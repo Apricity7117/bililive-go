@@ -1359,6 +1359,36 @@ func updateConfig(writer http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func applyDanmakuRecordUpdates(target *configs.DanmakuRecord, updates map[string]interface{}) {
+	if enable, ok := updates["enable"].(bool); ok {
+		target.Enable = enable
+	}
+	if saveGift, ok := updates["save_gift"].(bool); ok {
+		target.SaveGift = saveGift
+	}
+	if saveGift, ok := updates["saveGift"].(bool); ok {
+		target.SaveGift = saveGift
+	}
+	if useServerTimestamp, ok := updates["use_server_timestamp"].(bool); ok {
+		target.UseServerTimestamp = useServerTimestamp
+	}
+	if useServerTimestamp, ok := updates["useServerTimestamp"].(bool); ok {
+		target.UseServerTimestamp = useServerTimestamp
+	}
+	if rawFormats, ok := updates["formats"].([]interface{}); ok {
+		formats := make([]configs.DanmakuFormat, 0, len(rawFormats))
+		for _, raw := range rawFormats {
+			if format, ok := raw.(string); ok {
+				formats = append(formats, configs.DanmakuFormat(format))
+			}
+		}
+		target.Formats = formats
+	} else if rawFormat, ok := updates["format"].(string); ok {
+		// 兼容单格式写法，便于手写 JSON 或后续前端逐步迁移。
+		target.Formats = []configs.DanmakuFormat{configs.DanmakuFormat(rawFormat)}
+	}
+}
+
 // applyConfigUpdates 将更新应用到配置
 func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error {
 	// 处理 RPC 配置
@@ -1460,6 +1490,11 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 		if fixFlv, ok := orf["fix_flv_at_first"].(bool); ok {
 			c.OnRecordFinished.FixFlvAtFirst = fixFlv
 		}
+	}
+
+	// 处理弹幕录制配置
+	if danmaku, ok := updates["danmaku"].(map[string]interface{}); ok {
+		applyDanmakuRecordUpdates(&c.Danmaku, danmaku)
 	}
 
 	// 处理通知配置
@@ -1773,6 +1808,13 @@ func applyOverridableConfigUpdates(oc *configs.OverridableConfig, updates map[st
 	if timeoutSec, ok := updates["timeout_in_seconds"].(float64); ok {
 		val := int(timeoutSec * 1000000)
 		oc.TimeoutInUs = &val
+	}
+	if danmaku, ok := updates["danmaku"].(map[string]interface{}); ok {
+		if oc.Danmaku == nil {
+			defaultDanmaku := configs.DefaultDanmakuRecord()
+			oc.Danmaku = &defaultDanmaku
+		}
+		applyDanmakuRecordUpdates(oc.Danmaku, danmaku)
 	}
 
 	// 处理 feature 配置（包括 downloader_type）

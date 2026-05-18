@@ -82,6 +82,76 @@ type VideoSplitStrategies struct {
 	MaxFileSize       ByteSize      `yaml:"max_file_size" json:"max_file_size"`
 }
 
+// DanmakuFormat 弹幕录制输出格式
+type DanmakuFormat string
+
+const (
+	// DanmakuFormatXML 录制为 XML 文件
+	DanmakuFormatXML DanmakuFormat = "xml"
+	// DanmakuFormatJSON 录制为 JSON 文件
+	DanmakuFormatJSON DanmakuFormat = "json"
+)
+
+// IsValid 检查弹幕格式是否合法
+func (f DanmakuFormat) IsValid() bool {
+	switch f {
+	case DanmakuFormatXML, DanmakuFormatJSON:
+		return true
+	default:
+		return false
+	}
+}
+
+// DanmakuRecord 弹幕录制配置
+type DanmakuRecord struct {
+	Enable             bool            `yaml:"enable" json:"enable"`
+	SaveGift           bool            `yaml:"save_gift" json:"save_gift"`
+	UseServerTimestamp bool            `yaml:"use_server_timestamp" json:"use_server_timestamp"`
+	Formats            []DanmakuFormat `yaml:"formats" json:"formats"` // 可选: xml, json
+}
+
+// DefaultDanmakuRecord 返回弹幕录制默认配置。
+func DefaultDanmakuRecord() DanmakuRecord {
+	return DanmakuRecord{
+		Enable:             false,
+		SaveGift:           false,
+		UseServerTimestamp: true,
+		Formats:            []DanmakuFormat{DanmakuFormatXML},
+	}
+}
+
+// UnmarshalYAML 确保各层级弹幕配置在缺省字段时仍保留默认值。
+func (d *DanmakuRecord) UnmarshalYAML(value *yaml.Node) error {
+	type rawDanmakuRecord DanmakuRecord
+	defaults := rawDanmakuRecord(DefaultDanmakuRecord())
+	if err := value.Decode(&defaults); err != nil {
+		return err
+	}
+	*d = DanmakuRecord(defaults)
+	return nil
+}
+
+// NormalizeFormats 返回去重后的有效输出格式；启用但未配置格式时默认输出 XML
+func (d DanmakuRecord) NormalizeFormats() []DanmakuFormat {
+	formats := d.Formats
+	if len(formats) == 0 {
+		formats = []DanmakuFormat{DanmakuFormatXML}
+	}
+	seen := make(map[DanmakuFormat]struct{}, len(formats))
+	normalized := make([]DanmakuFormat, 0, len(formats))
+	for _, format := range formats {
+		if !format.IsValid() {
+			continue
+		}
+		if _, ok := seen[format]; ok {
+			continue
+		}
+		seen[format] = struct{}{}
+		normalized = append(normalized, format)
+	}
+	return normalized
+}
+
 // UploadTiming 上传时机
 type UploadTiming string
 
@@ -197,11 +267,11 @@ var defaultOpenListConfig = OpenListConfig{
 
 // UpdateConfig 自动更新配置
 type UpdateConfig struct {
-	// AutoCheck 是否启用自动检查更新（默认 true）
+	// AutoCheck 是否启用自动检查更新（默认 false）
 	AutoCheck bool `yaml:"auto_check" json:"auto_check"`
 	// CheckIntervalHours 检查更新间隔（小时，默认 6）
 	CheckIntervalHours int `yaml:"check_interval_hours" json:"check_interval_hours"`
-	// AutoDownload 是否自动下载更新（默认 true）
+	// AutoDownload 是否自动下载更新（默认 false）
 	// false 时仅检查并通知，需用户手动触发下载
 	AutoDownload bool `yaml:"auto_download" json:"auto_download"`
 	// IncludePrerelease 是否包含预发布版本（默认 false）
@@ -209,9 +279,9 @@ type UpdateConfig struct {
 }
 
 var defaultUpdateConfig = UpdateConfig{
-	AutoCheck:          true,
+	AutoCheck:          false,
 	CheckIntervalHours: 6,
-	AutoDownload:       true,
+	AutoDownload:       false,
 	IncludePrerelease:  false,
 }
 
@@ -237,6 +307,7 @@ type OverridableConfig struct {
 	OutputTmpl           *string               `yaml:"out_put_tmpl,omitempty" json:"out_put_tmpl,omitempty"`                     // 输出文件名模板
 	VideoSplitStrategies *VideoSplitStrategies `yaml:"video_split_strategies,omitempty" json:"video_split_strategies,omitempty"` // 视频分割策略
 	OnRecordFinished     *OnRecordFinished     `yaml:"on_record_finished,omitempty" json:"on_record_finished,omitempty"`         // 录制完成后的动作
+	Danmaku              *DanmakuRecord        `yaml:"danmaku,omitempty" json:"danmaku,omitempty"`                               // 弹幕录制配置
 	TimeoutInUs          *int                  `yaml:"timeout_in_us,omitempty" json:"timeout_in_us,omitempty"`                   // 超时设置(微秒)
 	StreamPreference     *StreamPreference     `yaml:"stream_preference,omitempty" json:"stream_preference,omitempty"`           // 流偏好配置
 }
@@ -282,6 +353,7 @@ type Config struct {
 	OutputTmpl           string               `yaml:"out_put_tmpl" json:"out_put_tmpl"`
 	VideoSplitStrategies VideoSplitStrategies `yaml:"video_split_strategies" json:"video_split_strategies"`
 	OnRecordFinished     OnRecordFinished     `yaml:"on_record_finished" json:"on_record_finished"`
+	Danmaku              DanmakuRecord        `yaml:"danmaku" json:"danmaku"`
 	TimeoutInUs          int                  `yaml:"timeout_in_us" json:"timeout_in_us"`
 
 	// 流偏好配置 - 两套系统并存
@@ -631,6 +703,7 @@ var defaultConfig = Config{
 		},
 		UploadTiming: UploadTimingAfterProcess,
 	},
+	Danmaku:     DefaultDanmakuRecord(),
 	TimeoutInUs: 60000000,
 	Notify: Notify{
 		SendRecordingSummary: false,
@@ -740,10 +813,18 @@ func (c *Config) Verify() error {
 	if !c.RPC.Enable && len(c.LiveRooms) == 0 {
 		return fmt.Errorf("RPC 服务已禁用且未配置直播间，程序无任务可执行")
 	}
+	if c.Danmaku.Enable && len(c.Danmaku.NormalizeFormats()) == 0 {
+		return fmt.Errorf("弹幕录制格式无效，请使用 xml 或 json")
+	}
 
 	// 验证平台配置
 	if err := c.ValidatePlatformConfigs(); err != nil {
 		return err
+	}
+	for _, room := range c.LiveRooms {
+		if room.Danmaku != nil && room.Danmaku.Enable && len(room.Danmaku.NormalizeFormats()) == 0 {
+			return fmt.Errorf("直播间 '%s': 弹幕录制格式无效，请使用 xml 或 json", room.Url)
+		}
 	}
 
 	return nil
@@ -877,10 +958,22 @@ func CloneConfigShallow(src *Config) *Config {
 		return nil
 	}
 	cp := *src // 先按值复制（浅拷贝）
+	if src.Danmaku.Formats != nil {
+		cp.Danmaku.Formats = append([]DanmakuFormat(nil), src.Danmaku.Formats...)
+	}
 	// 切片拷贝
 	if src.LiveRooms != nil {
 		cp.LiveRooms = make([]LiveRoom, len(src.LiveRooms))
 		copy(cp.LiveRooms, src.LiveRooms)
+		for i := range cp.LiveRooms {
+			if src.LiveRooms[i].Danmaku != nil {
+				danmaku := *src.LiveRooms[i].Danmaku
+				if danmaku.Formats != nil {
+					danmaku.Formats = append([]DanmakuFormat(nil), danmaku.Formats...)
+				}
+				cp.LiveRooms[i].Danmaku = &danmaku
+			}
+		}
 	}
 	// map 拷贝
 	if src.Cookies != nil {
@@ -893,6 +986,13 @@ func CloneConfigShallow(src *Config) *Config {
 	if src.PlatformConfigs != nil {
 		cp.PlatformConfigs = make(map[string]PlatformConfig, len(src.PlatformConfigs))
 		for k, v := range src.PlatformConfigs {
+			if v.Danmaku != nil {
+				danmaku := *v.Danmaku
+				if danmaku.Formats != nil {
+					danmaku.Formats = append([]DanmakuFormat(nil), danmaku.Formats...)
+				}
+				v.Danmaku = &danmaku
+			}
 			cp.PlatformConfigs[k] = v
 		}
 	}
@@ -920,6 +1020,7 @@ func (c *Config) ResolveConfigForRoom(room *LiveRoom, platformName string) Resol
 		OutputTmpl:           c.OutputTmpl,
 		VideoSplitStrategies: c.VideoSplitStrategies,
 		OnRecordFinished:     c.OnRecordFinished,
+		Danmaku:              c.Danmaku,
 		TimeoutInUs:          c.TimeoutInUs,
 	}
 
@@ -978,6 +1079,7 @@ type ResolvedConfig struct {
 	OutputTmpl           string               `json:"out_put_tmpl"`
 	VideoSplitStrategies VideoSplitStrategies `json:"video_split_strategies"`
 	OnRecordFinished     OnRecordFinished     `json:"on_record_finished"`
+	Danmaku              DanmakuRecord        `json:"danmaku"`
 	TimeoutInUs          int                  `json:"timeout_in_us"`
 	StreamPreference     StreamPreference     `json:"stream_preference"`
 }
@@ -1007,6 +1109,9 @@ func (r *ResolvedConfig) applyOverrides(override *OverridableConfig) {
 	}
 	if override.OnRecordFinished != nil {
 		r.OnRecordFinished = *override.OnRecordFinished
+	}
+	if override.Danmaku != nil {
+		r.Danmaku = *override.Danmaku
 	}
 	if override.TimeoutInUs != nil {
 		r.TimeoutInUs = *override.TimeoutInUs
@@ -1080,6 +1185,9 @@ func (c *Config) ValidatePlatformConfigs() error {
 		// 验证最小访问间隔
 		if platformConfig.MinAccessIntervalSec < 0 {
 			return fmt.Errorf("平台 '%s': 最小访问间隔不能为负数", platformKey)
+		}
+		if platformConfig.Danmaku != nil && platformConfig.Danmaku.Enable && len(platformConfig.Danmaku.NormalizeFormats()) == 0 {
+			return fmt.Errorf("平台 '%s': 弹幕录制格式无效，请使用 xml 或 json", platformKey)
 		}
 
 		// 验证路径（如果指定）

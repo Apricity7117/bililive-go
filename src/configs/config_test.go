@@ -48,11 +48,23 @@ func TestResolveConfigForRoom(t *testing.T) {
 		Interval:   60,
 		OutPutPath: "/global",
 		FfmpegPath: "/usr/bin/ffmpeg",
+		Danmaku: DanmakuRecord{
+			Enable:             false,
+			SaveGift:           false,
+			UseServerTimestamp: true,
+			Formats:            []DanmakuFormat{DanmakuFormatXML},
+		},
 		PlatformConfigs: map[string]PlatformConfig{
 			"douyin": {
 				OverridableConfig: OverridableConfig{
 					Interval:   intPtr(30),
 					OutPutPath: stringPtr("/douyin"),
+					Danmaku: &DanmakuRecord{
+						Enable:             true,
+						SaveGift:           true,
+						UseServerTimestamp: false,
+						Formats:            []DanmakuFormat{DanmakuFormatJSON},
+					},
 				},
 			},
 		},
@@ -73,6 +85,42 @@ func TestResolveConfigForRoom(t *testing.T) {
 	assert.Equal(t, "/douyin", resolved.OutPutPath)
 	// Global value should be used when no override exists
 	assert.Equal(t, "/usr/bin/ffmpeg", resolved.FfmpegPath)
+	assert.True(t, resolved.Danmaku.Enable)
+	assert.True(t, resolved.Danmaku.SaveGift)
+	assert.False(t, resolved.Danmaku.UseServerTimestamp)
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatJSON}, resolved.Danmaku.Formats)
+}
+
+func TestDanmakuRecordNormalizeFormats(t *testing.T) {
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, DanmakuRecord{Enable: true}.NormalizeFormats())
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML, DanmakuFormatJSON}, DanmakuRecord{
+		Enable:  true,
+		Formats: []DanmakuFormat{DanmakuFormatXML, DanmakuFormatJSON, DanmakuFormatXML, "bad"},
+	}.NormalizeFormats())
+}
+
+func TestDanmakuRecordUnmarshalYAMLDefaults(t *testing.T) {
+	cfg, err := NewConfigWithBytes([]byte(`
+rpc:
+  enable: true
+  bind: :8080
+interval: 30
+out_put_path: ./
+danmaku:
+  enable: true
+live_rooms:
+- url: https://live.bilibili.com/123456
+  danmaku:
+    enable: true
+`))
+	assert.NoError(t, err)
+	assert.True(t, cfg.Danmaku.Enable)
+	assert.False(t, cfg.Danmaku.SaveGift)
+	assert.True(t, cfg.Danmaku.UseServerTimestamp)
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, cfg.Danmaku.Formats)
+	assert.NotNil(t, cfg.LiveRooms[0].Danmaku)
+	assert.True(t, cfg.LiveRooms[0].Danmaku.UseServerTimestamp)
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, cfg.LiveRooms[0].Danmaku.Formats)
 }
 
 func TestGetPlatformMinAccessInterval(t *testing.T) {
@@ -113,6 +161,10 @@ live_rooms:
 	assert.Equal(t, 30, cfg.Interval)
 	assert.Len(t, cfg.LiveRooms, 1)
 	assert.Equal(t, "https://live.bilibili.com/123456", cfg.LiveRooms[0].Url)
+	assert.False(t, cfg.Danmaku.Enable)
+	assert.False(t, cfg.Danmaku.SaveGift)
+	assert.True(t, cfg.Danmaku.UseServerTimestamp)
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, cfg.Danmaku.Formats)
 
 	// Test that resolve works with no overrides
 	resolved := cfg.ResolveConfigForRoom(&cfg.LiveRooms[0], "bilibili")

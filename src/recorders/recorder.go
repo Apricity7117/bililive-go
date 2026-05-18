@@ -21,6 +21,7 @@ import (
 	"github.com/bluele/gcache"
 
 	"github.com/bililive-go/bililive-go/src/configs"
+	"github.com/bililive-go/bililive-go/src/danmaku"
 	"github.com/bililive-go/bililive-go/src/instance"
 	"github.com/bililive-go/bililive-go/src/live"
 	"github.com/bililive-go/bililive-go/src/notify"
@@ -448,13 +449,34 @@ func (r *recorder) tryRecord(ctx context.Context) {
 	// 设置当前录制文件路径
 	r.setCurrentFilePath(fileName)
 
+	var danmakuRecorder *danmaku.Recorder
+	var danmakuFiles []string
+	if resolvedConfig.Danmaku.Enable {
+		danmakuRecorder, err = danmaku.NewRecorder(ctx, r.Live, info, fileName, resolvedConfig.Danmaku, r.getLogger())
+		if err != nil {
+			r.getLogger().WithError(err).Warn("弹幕录制初始化失败，继续录制视频")
+		} else if danmakuRecorder != nil {
+			danmakuRecorder.Start()
+			defer danmakuRecorder.Close()
+		}
+	}
+
 	r.getLogger().Debugln("Start ParseLiveStream(" + url.String() + ", " + fileName + ")")
 	err = r.parser.ParseLiveStream(ctx, streamInfo, r.Live, fileName)
+	if danmakuRecorder != nil {
+		danmakuRecorder.Close()
+		danmakuFiles = danmakuRecorder.OutputFiles()
+	}
 
 	// 清除当前录制文件路径
 	r.setCurrentFilePath("")
 
 	if err != nil {
+		if stat, statErr := os.Stat(fileName); statErr != nil || stat.Size() == 0 {
+			for _, file := range danmakuFiles {
+				os.Remove(file)
+			}
+		}
 		r.getLogger().WithError(err).Error("failed to parse live stream")
 		return
 	}
@@ -465,7 +487,8 @@ func (r *recorder) tryRecord(ctx context.Context) {
 	cmdStr := strings.Trim(resolvedConfig.OnRecordFinished.CustomCommandline, "")
 	if len(cmdStr) > 0 {
 		// 累积录制文件信息（legacy 路径），待录制结束后统一推送摘要
-		r.accumulateRecordedFiles(fileName)
+		summaryFiles := append([]string{fileName}, danmakuFiles...)
+		r.accumulateRecordedFiles(summaryFiles...)
 
 		ffmpegPath, ffmpegErr := utils.GetFFmpegPathForLive(ctx, r.Live)
 		if ffmpegErr != nil {
@@ -562,7 +585,9 @@ func (r *recorder) tryRecord(ctx context.Context) {
 		}
 
 		// 累积录制文件信息，待录制结束后统一推送摘要
-		r.accumulateRecordedFiles(outputFiles...)
+		summaryFiles := append([]string{}, outputFiles...)
+		summaryFiles = append(summaryFiles, danmakuFiles...)
+		r.accumulateRecordedFiles(summaryFiles...)
 
 		// 获取 PipelineManager
 		pipelineManager := pipeline.GetManager(inst)

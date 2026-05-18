@@ -43,6 +43,17 @@ func DecorateConfigNode(node *yaml.Node) {
 #  custom_commandline: '{{ .Ffmpeg }} -hide_banner -i "{{ .FileName }}" -c copy "{{ .FileName | trimSuffix (.FileName | ext)}}.mp4"'`, "")
 	}
 
+	setFieldHeadComment(root, "danmaku", "# 弹幕录制配置（当前支持 B 站和抖音直播间）")
+	danmakuNode := findNode(root, "danmaku")
+	if danmakuNode != nil {
+		setFieldComment(danmakuNode, "enable", "# 是否录制弹幕，关闭时不会连接弹幕服务器", "")
+		setFieldComment(danmakuNode, "save_gift", "# 是否保存礼物和上舰事件", "")
+		setFieldComment(danmakuNode, "use_server_timestamp", "# 是否优先使用弹幕服务器返回的时间戳", "")
+		setFieldComment(danmakuNode, "formats",
+			`# 弹幕输出格式，可同时配置多个：xml、json
+# 例如: [xml] 或 [xml, json]`, "")
+	}
+
 	setFieldHeadComment(root, "notify", "# 通知服务配置")
 	notifyNode := findNode(root, "notify")
 	if notifyNode != nil {
