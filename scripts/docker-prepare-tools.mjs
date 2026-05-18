@@ -56,7 +56,7 @@ const SKIP_RULES = [
  * @param {object} config - 完整配置对象
  * @param {string} toolName - 工具名称
  * @param {string} arch - 目标架构 (amd64, arm64, arm)
- * @returns {{ version: string, url: string } | null}
+ * @returns {{ version: string, urls: string[] } | null}
  */
 function resolveToolDownload(config, toolName, arch) {
   const toolConfig = config[toolName];
@@ -81,46 +81,46 @@ function resolveToolDownload(config, toolName, arch) {
   //    如 bililive-recorder
   // 2. 按平台/架构分层的对象: { "linux": { "amd64": [...], "arm64": [...] } }
   //    如 ffmpeg, dotnet, node, biliLive-tools
-  let url = resolveUrl(downloadUrl, arch);
-  if (!url) {
+  const urls = resolveUrls(downloadUrl, arch);
+  if (urls.length === 0) {
     console.error(`  警告: 工具 "${toolName}" v${latestVersion} 无 linux/${arch} 的下载链接`);
     return null;
   }
 
-  return { version: latestVersion, url };
+  return { version: latestVersion, urls };
 }
 
 /**
- * 从 downloadUrl 结构中提取 linux/<arch> 的实际下载 URL（第一个，即主源）
+ * 从 downloadUrl 结构中提取 linux/<arch> 的下载 URL 列表（按优先级排序）
  * @param {string|string[]|object} downloadUrl
  * @param {string} arch
- * @returns {string|null}
+ * @returns {string[]}
  */
-function resolveUrl(downloadUrl, arch) {
+function resolveUrls(downloadUrl, arch) {
   // 情况1: 直接是字符串
   if (typeof downloadUrl === 'string') {
-    return downloadUrl;
+    return [downloadUrl];
   }
 
-  // 情况2: 数组 → 取第一个（主源）
+  // 情况2: 数组 → 按顺序作为主源和备用源
   if (Array.isArray(downloadUrl)) {
-    return downloadUrl[0] || null;
+    return downloadUrl.filter(Boolean);
   }
 
-  // 情况3: 按平台分层的对象 → 取 linux/<arch>
+  // 情况3: 按平台分层的对象 → 取 linux/<arch> 的主源和备用源
   if (typeof downloadUrl === 'object' && downloadUrl !== null) {
     const linuxUrls = downloadUrl['linux'];
-    if (!linuxUrls) return null;
+    if (!linuxUrls) return [];
 
     const archUrls = linuxUrls[arch];
-    if (!archUrls) return null;
+    if (!archUrls) return [];
 
     // archUrls 可能是字符串或数组
-    if (typeof archUrls === 'string') return archUrls;
-    if (Array.isArray(archUrls)) return archUrls[0] || null;
+    if (typeof archUrls === 'string') return [archUrls];
+    if (Array.isArray(archUrls)) return archUrls.filter(Boolean);
   }
 
-  return null;
+  return [];
 }
 
 /**
@@ -203,13 +203,64 @@ function downloadFile(url, destPath) {
 }
 
 /**
+ * 检查当前环境是否存在指定命令
+ * @param {string} command
+ * @returns {boolean}
+ */
+function hasCommand(command) {
+  try {
+    execSync(`command -v "${command}"`, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 从 URL 中解析归档文件名。备用下载源可能用 query 参数转发真实 URL。
+ * @param {string} url
+ * @returns {string}
+ */
+function archiveNameFromUrl(url) {
+  const parsedUrl = new URL(url);
+  const forwardedUrl = parsedUrl.searchParams.get('downloadurl');
+  if (forwardedUrl) {
+    return basename(new URL(forwardedUrl).pathname);
+  }
+  return basename(parsedUrl.pathname);
+}
+
+/**
+ * 下载并解压工具到目标目录，按顺序尝试备用源
+ * @param {string[]} urls
+ * @param {string} dest - 最终目标目录（例如 tools/ffmpeg/n8.1-latest）
+ */
+async function downloadAndExtract(urls, dest) {
+  const errors = [];
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    try {
+      await downloadAndExtractOne(url, dest);
+      return;
+    } catch (err) {
+      errors.push(`${url}: ${err.message}`);
+      console.error(`    失败: ${err.message}`);
+      if (i < urls.length - 1) {
+        console.log(`    尝试备用下载源...`);
+      }
+    }
+  }
+  throw new Error(`所有下载源均失败:\n${errors.map(err => `  - ${err}`).join('\n')}`);
+}
+
+/**
  * 下载并解压工具到目标目录
  * 模拟 remotetools 的 extractDownloadedFile() 行为
  * @param {string} url
- * @param {string} dest - 最终目标目录（例如 tools/ffmpeg/n8.0-latest）
+ * @param {string} dest - 最终目标目录（例如 tools/ffmpeg/n8.1-latest）
  */
-async function downloadAndExtract(url, dest) {
-  const filename = basename(new URL(url).pathname);
+async function downloadAndExtractOne(url, dest) {
+  const filename = archiveNameFromUrl(url);
 
   // 确保目标目录的父目录存在
   mkdirSync(dirname(dest), { recursive: true });
@@ -235,8 +286,12 @@ async function downloadAndExtract(url, dest) {
       // 跨平台解压 zip
       if (process.platform === 'win32') {
         execSync(`powershell -Command "Expand-Archive -Path '${tmpFile}' -DestinationPath '${tmpDir}' -Force"`, { stdio: 'inherit' });
-      } else {
+      } else if (hasCommand('unzip')) {
         execSync(`unzip -qo "${tmpFile}" -d "${tmpDir}"`, { stdio: 'inherit' });
+      } else if (hasCommand('python3')) {
+        execSync(`python3 -m zipfile -e "${tmpFile}" "${tmpDir}"`, { stdio: 'inherit' });
+      } else {
+        throw new Error('解压 zip 需要 unzip 或 python3');
       }
     } else {
       throw new Error(`不支持的格式: ${filename}`);
@@ -329,7 +384,10 @@ async function main() {
     }
 
     console.log(`  版本: ${result.version}`);
-    console.log(`  URL: ${result.url}`);
+    console.log(`  URL: ${result.urls[0]}`);
+    if (result.urls.length > 1) {
+      console.log(`  备用源: ${result.urls.length - 1} 个`);
+    }
     const destDir = join(outputDir, toolName, result.version);
     console.log(`  目标: ${destDir}`);
 
@@ -338,7 +396,7 @@ async function main() {
       continue;
     }
 
-    await downloadAndExtract(result.url, destDir);
+    await downloadAndExtract(result.urls, destDir);
     downloadCount++;
   }
 
