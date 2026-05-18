@@ -356,7 +356,7 @@ func resolveDouyinRuntime() (douyinRuntime, error) {
 
 	api := remotetools.Get()
 	if api == nil {
-		return douyinRuntime{}, fmt.Errorf("RemoteTools 尚未初始化，无法定位抖音弹幕运行环境")
+		return douyinRuntime{}, fmt.Errorf("remotetools 尚未初始化，无法定位抖音弹幕运行环境")
 	}
 	node, err := api.GetTool("node")
 	if err != nil {

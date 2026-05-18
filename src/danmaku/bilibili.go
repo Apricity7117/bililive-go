@@ -237,7 +237,7 @@ func (c *bilibiliClient) resolveRoomID(ctx context.Context) (string, error) {
 		roomID = strings.Trim(strings.Split(strings.Trim(parsed.Path, "/"), "/")[0], " ")
 	}
 	if roomID == "" {
-		return "", fmt.Errorf("B站房间号为空")
+		return "", fmt.Errorf("b站房间号为空")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bilibiliRoomInitURL+"?id="+url.QueryEscape(roomID), nil)
@@ -286,7 +286,7 @@ func (c *bilibiliClient) getDanmuInfo(ctx context.Context, roomID string) (token
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("B站 getDanmuInfo 返回 HTTP %d", resp.StatusCode)
+		return "", "", fmt.Errorf("b站 getDanmuInfo 返回 HTTP %d", resp.StatusCode)
 	}
 	var decoded struct {
 		Code int `json:"code"`
@@ -303,7 +303,7 @@ func (c *bilibiliClient) getDanmuInfo(ctx context.Context, roomID string) (token
 		return "", "", err
 	}
 	if decoded.Code != 0 {
-		return "", "", fmt.Errorf("B站 getDanmuInfo 返回异常 code=%d", decoded.Code)
+		return "", "", fmt.Errorf("b站 getDanmuInfo 返回异常 code=%d", decoded.Code)
 	}
 	if len(decoded.Data.HostList) == 0 {
 		return decoded.Data.Token, bilibiliDefaultWSURL, nil

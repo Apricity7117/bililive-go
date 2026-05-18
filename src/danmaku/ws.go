@@ -102,11 +102,11 @@ func dialWS(ctx context.Context, rawURL string, headers http.Header) (*wsConn, e
 	}
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		_ = conn.Close()
-		return nil, fmt.Errorf("WebSocket 握手失败: HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("websocket 握手失败: HTTP %d", resp.StatusCode)
 	}
 	if !validWSAccept(key, resp.Header.Get("Sec-WebSocket-Accept")) {
 		_ = conn.Close()
-		return nil, fmt.Errorf("WebSocket 握手校验失败")
+		return nil, fmt.Errorf("websocket 握手校验失败")
 	}
 	return &wsConn{conn: conn, r: reader}, nil
 }
@@ -132,7 +132,7 @@ func (c *wsConn) ReadMessage() ([]byte, error) {
 			}
 			fragments = append(fragments, payload...)
 			if len(fragments) > wsMaxPacketSize {
-				return nil, fmt.Errorf("WebSocket 消息过大")
+				return nil, fmt.Errorf("websocket 消息过大")
 			}
 			if fin {
 				return fragments, nil
@@ -183,7 +183,7 @@ func (c *wsConn) readFrame() (opcode byte, fin bool, payload []byte, err error) 
 		length = binary.BigEndian.Uint64(extended)
 	}
 	if length > wsMaxPacketSize {
-		return 0, false, nil, fmt.Errorf("WebSocket 帧过大: %d", length)
+		return 0, false, nil, fmt.Errorf("websocket 帧过大: %d", length)
 	}
 	var maskKey [4]byte
 	if masked {
