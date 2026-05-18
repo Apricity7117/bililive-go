@@ -12,8 +12,8 @@ on:
 
 jobs:
   claude-review:
-    # 跳过来自 Fork 仓库的 PR，因为 GitHub 安全机制不允许 Fork PR 获取 OIDC Token
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # 仅在上游仓库的同仓库 PR 运行。个人 fork 通常没有 CLAUDE_CODE_OAUTH_TOKEN。
+    if: github.repository == 'bililive-go/bililive-go' && github.event.pull_request.head.repo.full_name == github.repository
 
     runs-on: ubuntu-latest
     permissions:
@@ -38,4 +38,3 @@ jobs:
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
-
