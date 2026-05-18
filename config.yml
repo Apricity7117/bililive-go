@@ -46,6 +46,18 @@ on_record_finished:
     upload_path_tmpl: /录播归档/{{ .Platform }}/{{ .HostName }}/{{ .RoomName }}-{{ now | date "2006-01-02" }}.{{ .Ext }}
     delete_after_upload: false
   upload_timing: after_process
+# 弹幕录制配置（当前支持 B 站和抖音直播间）
+danmaku:
+  # 是否录制弹幕，关闭时不会连接弹幕服务器
+  enable: false
+  # 是否保存礼物和上舰事件
+  save_gift: false
+  # 是否优先使用弹幕服务器返回的时间戳
+  use_server_timestamp: true
+  # 弹幕输出格式，可同时配置多个：xml、json
+  # 例如: [xml] 或 [xml, json]
+  formats:
+    - xml
 timeout_in_us: 60000000
 live_rooms:
   # quality参数目前仅B站启用，默认为0
