@@ -311,6 +311,9 @@ func (c *douyinClient) resolveLiveID(ctx context.Context, roomID string) string 
 }
 
 func (c *douyinClient) cookieHeader() string {
+	if !c.cfg.UseCookie {
+		return ""
+	}
 	options := c.liveObj.GetOptions()
 	if options == nil || options.Cookies == nil {
 		return ""

@@ -49,6 +49,7 @@ func DecorateConfigNode(node *yaml.Node) {
 		setFieldComment(danmakuNode, "enable", "# 是否录制弹幕，关闭时不会连接弹幕服务器", "")
 		setFieldComment(danmakuNode, "save_gift", "# 是否保存礼物和上舰事件", "")
 		setFieldComment(danmakuNode, "use_server_timestamp", "# 是否优先使用弹幕服务器返回的时间戳", "")
+		setFieldComment(danmakuNode, "use_cookie", "# 弹幕连接时是否使用已配置的 Cookie", "")
 		setFieldComment(danmakuNode, "formats",
 			`# 弹幕输出格式，可同时配置多个：xml、json
 # 例如: [xml] 或 [xml, json]`, "")

@@ -54,6 +54,8 @@ danmaku:
   save_gift: false
   # 是否优先使用弹幕服务器返回的时间戳
   use_server_timestamp: true
+  # 弹幕连接时是否使用已配置的 Cookie
+  use_cookie: true
   # 弹幕输出格式，可同时配置多个：xml、json
   # 例如: [xml] 或 [xml, json]
   formats:

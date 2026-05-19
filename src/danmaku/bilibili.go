@@ -40,17 +40,19 @@ type bilibiliClient struct {
 	roomID             string
 	logger             *livelogger.LiveLogger
 	useServerTimestamp bool
+	useCookie          bool
 
 	mu   sync.Mutex
 	conn *wsConn
 }
 
-func newBilibiliClient(liveObj live.Live, roomID string, logger *livelogger.LiveLogger, useServerTimestamp bool) *bilibiliClient {
+func newBilibiliClient(liveObj live.Live, roomID string, logger *livelogger.LiveLogger, useServerTimestamp bool, useCookie bool) *bilibiliClient {
 	return &bilibiliClient{
 		liveObj:            liveObj,
 		roomID:             roomID,
 		logger:             logger,
 		useServerTimestamp: useServerTimestamp,
+		useCookie:          useCookie,
 	}
 }
 
@@ -319,6 +321,9 @@ func (c *bilibiliClient) getDanmuInfo(ctx context.Context, roomID string) (token
 }
 
 func (c *bilibiliClient) cookieHeader() string {
+	if !c.useCookie {
+		return ""
+	}
 	options := c.liveObj.GetOptions()
 	if options == nil || options.Cookies == nil {
 		return ""

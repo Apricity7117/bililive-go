@@ -107,7 +107,75 @@ type DanmakuRecord struct {
 	Enable             bool            `yaml:"enable" json:"enable"`
 	SaveGift           bool            `yaml:"save_gift" json:"save_gift"`
 	UseServerTimestamp bool            `yaml:"use_server_timestamp" json:"use_server_timestamp"`
+	UseCookie          bool            `yaml:"use_cookie" json:"use_cookie"`
 	Formats            []DanmakuFormat `yaml:"formats" json:"formats"` // 可选: xml, json
+}
+
+// DanmakuOverride 表示平台/直播间级别的弹幕录制覆盖配置。
+// 布尔字段使用指针以区分“显式覆盖为 false”和“未设置，继承上级”。
+type DanmakuOverride struct {
+	Enable             *bool           `yaml:"enable,omitempty" json:"enable,omitempty"`
+	SaveGift           *bool           `yaml:"save_gift,omitempty" json:"save_gift,omitempty"`
+	UseServerTimestamp *bool           `yaml:"use_server_timestamp,omitempty" json:"use_server_timestamp,omitempty"`
+	UseCookie          *bool           `yaml:"use_cookie,omitempty" json:"use_cookie,omitempty"`
+	Formats            []DanmakuFormat `yaml:"formats,omitempty" json:"formats,omitempty"` // 可选: xml, json
+}
+
+func (d *DanmakuOverride) IsEmpty() bool {
+	return d == nil ||
+		(d.Enable == nil &&
+			d.SaveGift == nil &&
+			d.UseServerTimestamp == nil &&
+			d.UseCookie == nil &&
+			d.Formats == nil)
+}
+
+func (d *DanmakuOverride) ApplyTo(target *DanmakuRecord) {
+	if d == nil || target == nil {
+		return
+	}
+	if d.Enable != nil {
+		target.Enable = *d.Enable
+	}
+	if d.SaveGift != nil {
+		target.SaveGift = *d.SaveGift
+	}
+	if d.UseServerTimestamp != nil {
+		target.UseServerTimestamp = *d.UseServerTimestamp
+	}
+	if d.UseCookie != nil {
+		target.UseCookie = *d.UseCookie
+	}
+	if d.Formats != nil {
+		target.Formats = append([]DanmakuFormat(nil), d.Formats...)
+	}
+}
+
+func (d *DanmakuOverride) Clone() *DanmakuOverride {
+	if d == nil {
+		return nil
+	}
+	cp := *d
+	if d.Enable != nil {
+		v := *d.Enable
+		cp.Enable = &v
+	}
+	if d.SaveGift != nil {
+		v := *d.SaveGift
+		cp.SaveGift = &v
+	}
+	if d.UseServerTimestamp != nil {
+		v := *d.UseServerTimestamp
+		cp.UseServerTimestamp = &v
+	}
+	if d.UseCookie != nil {
+		v := *d.UseCookie
+		cp.UseCookie = &v
+	}
+	if d.Formats != nil {
+		cp.Formats = append([]DanmakuFormat(nil), d.Formats...)
+	}
+	return &cp
 }
 
 // DefaultDanmakuRecord 返回弹幕录制默认配置。
@@ -116,6 +184,7 @@ func DefaultDanmakuRecord() DanmakuRecord {
 		Enable:             false,
 		SaveGift:           false,
 		UseServerTimestamp: true,
+		UseCookie:          true,
 		Formats:            []DanmakuFormat{DanmakuFormatXML},
 	}
 }
@@ -307,7 +376,7 @@ type OverridableConfig struct {
 	OutputTmpl           *string               `yaml:"out_put_tmpl,omitempty" json:"out_put_tmpl,omitempty"`                     // 输出文件名模板
 	VideoSplitStrategies *VideoSplitStrategies `yaml:"video_split_strategies,omitempty" json:"video_split_strategies,omitempty"` // 视频分割策略
 	OnRecordFinished     *OnRecordFinished     `yaml:"on_record_finished,omitempty" json:"on_record_finished,omitempty"`         // 录制完成后的动作
-	Danmaku              *DanmakuRecord        `yaml:"danmaku,omitempty" json:"danmaku,omitempty"`                               // 弹幕录制配置
+	Danmaku              *DanmakuOverride      `yaml:"danmaku,omitempty" json:"danmaku,omitempty"`                               // 弹幕录制配置
 	TimeoutInUs          *int                  `yaml:"timeout_in_us,omitempty" json:"timeout_in_us,omitempty"`                   // 超时设置(微秒)
 	StreamPreference     *StreamPreference     `yaml:"stream_preference,omitempty" json:"stream_preference,omitempty"`           // 流偏好配置
 }
@@ -822,7 +891,8 @@ func (c *Config) Verify() error {
 		return err
 	}
 	for _, room := range c.LiveRooms {
-		if room.Danmaku != nil && room.Danmaku.Enable && len(room.Danmaku.NormalizeFormats()) == 0 {
+		resolved := c.ResolveConfigForRoom(&room, GetPlatformKeyFromUrl(room.Url))
+		if resolved.Danmaku.Enable && len(resolved.Danmaku.NormalizeFormats()) == 0 {
 			return fmt.Errorf("直播间 '%s': 弹幕录制格式无效，请使用 xml 或 json", room.Url)
 		}
 	}
@@ -966,13 +1036,7 @@ func CloneConfigShallow(src *Config) *Config {
 		cp.LiveRooms = make([]LiveRoom, len(src.LiveRooms))
 		copy(cp.LiveRooms, src.LiveRooms)
 		for i := range cp.LiveRooms {
-			if src.LiveRooms[i].Danmaku != nil {
-				danmaku := *src.LiveRooms[i].Danmaku
-				if danmaku.Formats != nil {
-					danmaku.Formats = append([]DanmakuFormat(nil), danmaku.Formats...)
-				}
-				cp.LiveRooms[i].Danmaku = &danmaku
-			}
+			cp.LiveRooms[i].Danmaku = src.LiveRooms[i].Danmaku.Clone()
 		}
 	}
 	// map 拷贝
@@ -986,13 +1050,7 @@ func CloneConfigShallow(src *Config) *Config {
 	if src.PlatformConfigs != nil {
 		cp.PlatformConfigs = make(map[string]PlatformConfig, len(src.PlatformConfigs))
 		for k, v := range src.PlatformConfigs {
-			if v.Danmaku != nil {
-				danmaku := *v.Danmaku
-				if danmaku.Formats != nil {
-					danmaku.Formats = append([]DanmakuFormat(nil), danmaku.Formats...)
-				}
-				v.Danmaku = &danmaku
-			}
+			v.Danmaku = v.Danmaku.Clone()
 			cp.PlatformConfigs[k] = v
 		}
 	}
@@ -1111,7 +1169,7 @@ func (r *ResolvedConfig) applyOverrides(override *OverridableConfig) {
 		r.OnRecordFinished = *override.OnRecordFinished
 	}
 	if override.Danmaku != nil {
-		r.Danmaku = *override.Danmaku
+		override.Danmaku.ApplyTo(&r.Danmaku)
 	}
 	if override.TimeoutInUs != nil {
 		r.TimeoutInUs = *override.TimeoutInUs
@@ -1186,7 +1244,9 @@ func (c *Config) ValidatePlatformConfigs() error {
 		if platformConfig.MinAccessIntervalSec < 0 {
 			return fmt.Errorf("平台 '%s': 最小访问间隔不能为负数", platformKey)
 		}
-		if platformConfig.Danmaku != nil && platformConfig.Danmaku.Enable && len(platformConfig.Danmaku.NormalizeFormats()) == 0 {
+		resolvedDanmaku := c.Danmaku
+		platformConfig.Danmaku.ApplyTo(&resolvedDanmaku)
+		if resolvedDanmaku.Enable && len(resolvedDanmaku.NormalizeFormats()) == 0 {
 			return fmt.Errorf("平台 '%s': 弹幕录制格式无效，请使用 xml 或 json", platformKey)
 		}
 

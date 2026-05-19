@@ -171,7 +171,7 @@ func newMessageClient(liveObj live.Live, roomID string, logger *livelogger.LiveL
 	}
 	switch parsed.Host {
 	case "live.bilibili.com":
-		return newBilibiliClient(liveObj, roomID, logger, cfg.UseServerTimestamp), nil
+		return newBilibiliClient(liveObj, roomID, logger, cfg.UseServerTimestamp, cfg.UseCookie), nil
 	case "live.douyin.com", "v.douyin.com", "www.douyin.com":
 		return newDouyinClient(liveObj, roomID, logger, cfg), nil
 	default:

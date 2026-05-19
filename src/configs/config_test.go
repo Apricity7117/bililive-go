@@ -52,6 +52,7 @@ func TestResolveConfigForRoom(t *testing.T) {
 			Enable:             false,
 			SaveGift:           false,
 			UseServerTimestamp: true,
+			UseCookie:          true,
 			Formats:            []DanmakuFormat{DanmakuFormatXML},
 		},
 		PlatformConfigs: map[string]PlatformConfig{
@@ -59,10 +60,11 @@ func TestResolveConfigForRoom(t *testing.T) {
 				OverridableConfig: OverridableConfig{
 					Interval:   intPtr(30),
 					OutPutPath: stringPtr("/douyin"),
-					Danmaku: &DanmakuRecord{
-						Enable:             true,
-						SaveGift:           true,
-						UseServerTimestamp: false,
+					Danmaku: &DanmakuOverride{
+						Enable:             boolPtr(true),
+						SaveGift:           boolPtr(true),
+						UseServerTimestamp: boolPtr(false),
+						UseCookie:          boolPtr(false),
 						Formats:            []DanmakuFormat{DanmakuFormatJSON},
 					},
 				},
@@ -88,6 +90,7 @@ func TestResolveConfigForRoom(t *testing.T) {
 	assert.True(t, resolved.Danmaku.Enable)
 	assert.True(t, resolved.Danmaku.SaveGift)
 	assert.False(t, resolved.Danmaku.UseServerTimestamp)
+	assert.False(t, resolved.Danmaku.UseCookie)
 	assert.Equal(t, []DanmakuFormat{DanmakuFormatJSON}, resolved.Danmaku.Formats)
 }
 
@@ -117,10 +120,59 @@ live_rooms:
 	assert.True(t, cfg.Danmaku.Enable)
 	assert.False(t, cfg.Danmaku.SaveGift)
 	assert.True(t, cfg.Danmaku.UseServerTimestamp)
+	assert.True(t, cfg.Danmaku.UseCookie)
 	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, cfg.Danmaku.Formats)
 	assert.NotNil(t, cfg.LiveRooms[0].Danmaku)
-	assert.True(t, cfg.LiveRooms[0].Danmaku.UseServerTimestamp)
-	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, cfg.LiveRooms[0].Danmaku.Formats)
+	assert.NotNil(t, cfg.LiveRooms[0].Danmaku.Enable)
+	assert.True(t, *cfg.LiveRooms[0].Danmaku.Enable)
+	assert.Nil(t, cfg.LiveRooms[0].Danmaku.UseServerTimestamp)
+	assert.Nil(t, cfg.LiveRooms[0].Danmaku.UseCookie)
+	assert.Nil(t, cfg.LiveRooms[0].Danmaku.Formats)
+
+	resolved := cfg.ResolveConfigForRoom(&cfg.LiveRooms[0], "bilibili")
+	assert.True(t, resolved.Danmaku.UseServerTimestamp)
+	assert.True(t, resolved.Danmaku.UseCookie)
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, resolved.Danmaku.Formats)
+}
+
+func TestDanmakuOverrideInheritsUnsetFields(t *testing.T) {
+	cfg := &Config{
+		Interval:   60,
+		OutPutPath: "/global",
+		Danmaku: DanmakuRecord{
+			Enable:             false,
+			SaveGift:           true,
+			UseServerTimestamp: true,
+			UseCookie:          true,
+			Formats:            []DanmakuFormat{DanmakuFormatXML},
+		},
+		PlatformConfigs: map[string]PlatformConfig{
+			"bilibili": {
+				OverridableConfig: OverridableConfig{
+					Danmaku: &DanmakuOverride{
+						Enable:    boolPtr(true),
+						UseCookie: boolPtr(false),
+					},
+				},
+			},
+		},
+	}
+
+	room := &LiveRoom{
+		Url: "https://live.bilibili.com/123456",
+		OverridableConfig: OverridableConfig{
+			Danmaku: &DanmakuOverride{
+				SaveGift: boolPtr(false),
+			},
+		},
+	}
+
+	resolved := cfg.ResolveConfigForRoom(room, "bilibili")
+	assert.True(t, resolved.Danmaku.Enable)
+	assert.False(t, resolved.Danmaku.SaveGift)
+	assert.True(t, resolved.Danmaku.UseServerTimestamp)
+	assert.False(t, resolved.Danmaku.UseCookie)
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, resolved.Danmaku.Formats)
 }
 
 func TestGetPlatformMinAccessInterval(t *testing.T) {
@@ -164,6 +216,7 @@ live_rooms:
 	assert.False(t, cfg.Danmaku.Enable)
 	assert.False(t, cfg.Danmaku.SaveGift)
 	assert.True(t, cfg.Danmaku.UseServerTimestamp)
+	assert.True(t, cfg.Danmaku.UseCookie)
 	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, cfg.Danmaku.Formats)
 
 	// Test that resolve works with no overrides
@@ -307,4 +360,8 @@ func intPtr(i int) *int {
 
 func stringPtr(s string) *string {
 	return &s
+}
+
+func boolPtr(b bool) *bool {
+	return &b
 }

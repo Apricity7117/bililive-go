@@ -1053,6 +1053,7 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 			"audio_only":   room.AudioOnly,
 			"nick_name":    room.NickName,
 			"live_id":      string(room.LiveId),
+			"danmaku":      room.Danmaku,
 		}
 
 		// 从缓存获取直播间信息（不触发网络请求）
@@ -1125,6 +1126,7 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 			"warning_message":         warningMessage,
 			"out_put_path":            platformConfig.OutPutPath,
 			"ffmpeg_path":             platformConfig.FfmpegPath,
+			"danmaku":                 platformConfig.Danmaku,
 		})
 		processedPlatforms[platformKey] = true
 	}
@@ -1151,6 +1153,7 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 			"has_rooms":              true,
 			"effective_interval":     cfg.Interval,
 			"actual_access_interval": actualAccessInterval,
+			"danmaku":                nil,
 		})
 		processedPlatforms[platformKey] = true
 	}
@@ -1172,6 +1175,7 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 			"interval":                platformConfig.Interval,
 			"out_put_path":            platformConfig.OutPutPath,
 			"ffmpeg_path":             platformConfig.FfmpegPath,
+			"danmaku":                 platformConfig.Danmaku,
 		})
 		processedPlatforms[platformKey] = true
 	}
@@ -1375,6 +1379,12 @@ func applyDanmakuRecordUpdates(target *configs.DanmakuRecord, updates map[string
 	if useServerTimestamp, ok := updates["useServerTimestamp"].(bool); ok {
 		target.UseServerTimestamp = useServerTimestamp
 	}
+	if useCookie, ok := updates["use_cookie"].(bool); ok {
+		target.UseCookie = useCookie
+	}
+	if useCookie, ok := updates["useCookie"].(bool); ok {
+		target.UseCookie = useCookie
+	}
 	if rawFormats, ok := updates["formats"].([]interface{}); ok {
 		formats := make([]configs.DanmakuFormat, 0, len(rawFormats))
 		for _, raw := range rawFormats {
@@ -1385,6 +1395,73 @@ func applyDanmakuRecordUpdates(target *configs.DanmakuRecord, updates map[string
 		target.Formats = formats
 	} else if rawFormat, ok := updates["format"].(string); ok {
 		// 兼容单格式写法，便于手写 JSON 或后续前端逐步迁移。
+		target.Formats = []configs.DanmakuFormat{configs.DanmakuFormat(rawFormat)}
+	}
+}
+
+func applyDanmakuOverrideUpdates(target *configs.DanmakuOverride, updates map[string]interface{}) {
+	if raw, exists := updates["enable"]; exists {
+		if raw == nil {
+			target.Enable = nil
+		} else if enable, ok := raw.(bool); ok {
+			target.Enable = &enable
+		}
+	}
+	if raw, exists := updates["save_gift"]; exists {
+		if raw == nil {
+			target.SaveGift = nil
+		} else if saveGift, ok := raw.(bool); ok {
+			target.SaveGift = &saveGift
+		}
+	}
+	if raw, exists := updates["saveGift"]; exists {
+		if raw == nil {
+			target.SaveGift = nil
+		} else if saveGift, ok := raw.(bool); ok {
+			target.SaveGift = &saveGift
+		}
+	}
+	if raw, exists := updates["use_server_timestamp"]; exists {
+		if raw == nil {
+			target.UseServerTimestamp = nil
+		} else if useServerTimestamp, ok := raw.(bool); ok {
+			target.UseServerTimestamp = &useServerTimestamp
+		}
+	}
+	if raw, exists := updates["useServerTimestamp"]; exists {
+		if raw == nil {
+			target.UseServerTimestamp = nil
+		} else if useServerTimestamp, ok := raw.(bool); ok {
+			target.UseServerTimestamp = &useServerTimestamp
+		}
+	}
+	if raw, exists := updates["use_cookie"]; exists {
+		if raw == nil {
+			target.UseCookie = nil
+		} else if useCookie, ok := raw.(bool); ok {
+			target.UseCookie = &useCookie
+		}
+	}
+	if raw, exists := updates["useCookie"]; exists {
+		if raw == nil {
+			target.UseCookie = nil
+		} else if useCookie, ok := raw.(bool); ok {
+			target.UseCookie = &useCookie
+		}
+	}
+	if raw, exists := updates["formats"]; exists {
+		if raw == nil {
+			target.Formats = nil
+		} else if rawFormats, ok := raw.([]interface{}); ok {
+			formats := make([]configs.DanmakuFormat, 0, len(rawFormats))
+			for _, item := range rawFormats {
+				if format, ok := item.(string); ok {
+					formats = append(formats, configs.DanmakuFormat(format))
+				}
+			}
+			target.Formats = formats
+		}
+	} else if rawFormat, ok := updates["format"].(string); ok {
 		target.Formats = []configs.DanmakuFormat{configs.DanmakuFormat(rawFormat)}
 	}
 }
@@ -1809,12 +1886,18 @@ func applyOverridableConfigUpdates(oc *configs.OverridableConfig, updates map[st
 		val := int(timeoutSec * 1000000)
 		oc.TimeoutInUs = &val
 	}
-	if danmaku, ok := updates["danmaku"].(map[string]interface{}); ok {
-		if oc.Danmaku == nil {
-			defaultDanmaku := configs.DefaultDanmakuRecord()
-			oc.Danmaku = &defaultDanmaku
+	if rawDanmaku, exists := updates["danmaku"]; exists {
+		if rawDanmaku == nil {
+			oc.Danmaku = nil
+		} else if danmaku, ok := rawDanmaku.(map[string]interface{}); ok {
+			if oc.Danmaku == nil {
+				oc.Danmaku = &configs.DanmakuOverride{}
+			}
+			applyDanmakuOverrideUpdates(oc.Danmaku, danmaku)
+			if oc.Danmaku.IsEmpty() {
+				oc.Danmaku = nil
+			}
 		}
-		applyDanmakuRecordUpdates(oc.Danmaku, danmaku)
 	}
 
 	// 处理 feature 配置（包括 downloader_type）
