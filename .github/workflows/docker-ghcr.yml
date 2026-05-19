@@ -81,22 +81,41 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin; then
+              exit 0
+            fi
+            echo "GHCR login failed, retrying in $((attempt * 10)) seconds..."
+            sleep $((attempt * 10))
+          done
+          exit 1
 
       - name: Build and push image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: Dockerfile
-          platforms: ${{ env.IMAGE_PLATFORM }}
-          push: true
-          tags: ${{ env.TAGS }}
-          cache-from: type=gha,scope=ghcr-${{ env.IMAGE_ARCH }}
-          cache-to: type=gha,mode=max,scope=ghcr-${{ env.IMAGE_ARCH }}
+        shell: bash
+        run: |
+          tags_args=()
+          IFS=',' read -ra tag_list <<< "$TAGS"
+          for tag in "${tag_list[@]}"; do
+            tags_args+=("-t" "$tag")
+          done
+
+          for attempt in 1 2 3; do
+            if docker buildx build \
+              --file Dockerfile \
+              --platform "$IMAGE_PLATFORM" \
+              --push \
+              "${tags_args[@]}" \
+              --cache-from "type=gha,scope=ghcr-${IMAGE_ARCH}" \
+              --cache-to "type=gha,mode=max,scope=ghcr-${IMAGE_ARCH}" \
+              .; then
+              exit 0
+            fi
+            echo "Docker build/push failed, retrying in $((attempt * 20)) seconds..."
+            sleep $((attempt * 20))
+          done
+          exit 1
 
       - name: Print image
         run: |
