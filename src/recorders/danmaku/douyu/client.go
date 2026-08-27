@@ -27,17 +27,37 @@ const (
 )
 
 type DouyuClient struct {
-	roomID    string
-	cookies   string
-	conn      net.Conn
-	onDanmaku func(username, content string, color int)
-	onGift    func(username, giftName string, num int)
-	done      chan struct{}
-	closeOnce sync.Once
-	logger    *logrus.Entry
-	mu        sync.Mutex
-	running   bool
-	cachedAddr string
+	roomID         string
+	cookies        string
+	conn           net.Conn
+	onDanmaku      func(username, content string, color int)
+	onGift         func(username, giftName string, num int)
+	onDanmakuEvent func(DanmakuEvent)
+	onGiftEvent    func(GiftEvent)
+	done           chan struct{}
+	closeOnce      sync.Once
+	logger         *logrus.Entry
+	mu             sync.Mutex
+	running        bool
+	cachedAddr     string
+}
+
+// DanmakuEvent 是斗鱼普通弹幕的原始字段快照。
+type DanmakuEvent struct {
+	Username  string
+	Content   string
+	UID       string
+	Color     int
+	Timestamp int64
+}
+
+// GiftEvent 是斗鱼礼物的原始字段快照。
+type GiftEvent struct {
+	Username  string
+	GiftName  string
+	UID       string
+	Count     int
+	Timestamp int64
 }
 
 func NewDouyuClient(roomID, cookies string, onDanmaku func(username, content string, color int), onGift func(username, giftName string, num int), logger *logrus.Entry) *DouyuClient {
@@ -50,6 +70,12 @@ func NewDouyuClient(roomID, cookies string, onDanmaku func(username, content str
 		logger:    logger,
 	}
 }
+
+// OnDanmakuEvent 注册保留斗鱼协议字段的弹幕回调。
+func (c *DouyuClient) OnDanmakuEvent(fn func(DanmakuEvent)) { c.onDanmakuEvent = fn }
+
+// OnGiftEvent 注册保留斗鱼协议字段的礼物回调。
+func (c *DouyuClient) OnGiftEvent(fn func(GiftEvent)) { c.onGiftEvent = fn }
 
 func (c *DouyuClient) Start(ctx context.Context) error {
 	addr := c.resolveServerAddr()
@@ -343,12 +369,12 @@ func (c *DouyuClient) readLoop(ctx context.Context) error {
 		case "chatmsg":
 			nn := fields["nn"]
 			txt := fields["txt"]
-			if nn != "" && txt != "" && c.onDanmaku != nil {
+			if nn != "" && txt != "" && (c.onDanmaku != nil || c.onDanmakuEvent != nil) {
 				col := parseDouyuColor(fields["col"])
-				c.handleDanmakuSafe(nn, txt, col)
+				c.handleDanmakuEventSafe(DanmakuEvent{Username: nn, Content: txt, UID: fields["uid"], Color: col, Timestamp: parseEventTimestamp(fields)})
 			}
 		case "dgb":
-			if c.onGift != nil {
+			if c.onGift != nil || c.onGiftEvent != nil {
 				nn := fields["nn"]
 				gfn := fields["gfn"]
 				gfcnt := fields["gfcnt"]
@@ -357,7 +383,7 @@ func (c *DouyuClient) readLoop(ctx context.Context) error {
 					if n, err := strconv.Atoi(gfcnt); err == nil && n > 0 {
 						num = n
 					}
-					c.handleGiftSafe(nn, gfn, num)
+					c.handleGiftEventSafe(GiftEvent{Username: nn, GiftName: gfn, UID: fields["uid"], Count: num, Timestamp: parseEventTimestamp(fields)})
 				}
 			}
 		case "pingreq":
@@ -541,22 +567,39 @@ func parseDouyuColor(col string) int {
 	}
 }
 
-// handleDanmakuSafe 带 panic 恢复的弹幕处理
-func (c *DouyuClient) handleDanmakuSafe(username, content string, color int) {
+// handleDanmakuEventSafe 带 panic 恢复并保留原始字段的弹幕处理。
+func (c *DouyuClient) handleDanmakuEventSafe(event DanmakuEvent) {
 	defer func() {
 		if r := recover(); r != nil {
 			c.logger.Errorf("弹幕处理 panic: %v", r)
 		}
 	}()
-	c.onDanmaku(username, content, color)
+	if c.onDanmakuEvent != nil {
+		c.onDanmakuEvent(event)
+	} else if c.onDanmaku != nil {
+		c.onDanmaku(event.Username, event.Content, event.Color)
+	}
 }
 
-// handleGiftSafe 带 panic 恢复的礼物处理
-func (c *DouyuClient) handleGiftSafe(username, giftName string, num int) {
+// handleGiftEventSafe 带 panic 恢复并保留原始字段的礼物处理。
+func (c *DouyuClient) handleGiftEventSafe(event GiftEvent) {
 	defer func() {
 		if r := recover(); r != nil {
 			c.logger.Errorf("礼物处理 panic: %v", r)
 		}
 	}()
-	c.onGift(username, giftName, num)
+	if c.onGiftEvent != nil {
+		c.onGiftEvent(event)
+	} else if c.onGift != nil {
+		c.onGift(event.Username, event.GiftName, event.Count)
+	}
+}
+
+func parseEventTimestamp(fields map[string]string) int64 {
+	for _, key := range []string{"timestamp", "ts", "ct"} {
+		if value, err := strconv.ParseInt(fields[key], 10, 64); err == nil && value > 0 {
+			return value
+		}
+	}
+	return 0
 }

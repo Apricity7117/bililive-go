@@ -77,49 +77,101 @@ func (f *Feature) GetEffectiveDownloaderType() DownloaderType {
 
 // DanmakuConfig 弹幕录制配置
 type DanmakuConfig struct {
-	FontSize         int    `yaml:"font_size" json:"font_size"`               // 字体大小 (12~120)
-	FontName         string `yaml:"font_name" json:"font_name"`               // 字体名称
-	ScrollArea       string `yaml:"scroll_area" json:"scroll_area"`           // 滚动区域: full(全屏), top(顶部半屏), bottom(底部半屏), quarter(1/4屏), three-quarter(3/4屏)
-	ScrollTime       int    `yaml:"scroll_time" json:"scroll_time"`           // 弹幕滚过屏幕的秒数 (5~20)
-	Resolution       string `yaml:"resolution" json:"resolution"`             // 播放分辨率
-	Outline          *int   `yaml:"outline,omitempty" json:"outline,omitempty"`   // 描边粗细 (0~4)，nil 表示使用默认值
-	Opacity          *int   `yaml:"opacity,omitempty" json:"opacity,omitempty"`   // 背景透明度 (0~255)，nil 表示使用默认值
-	RecordGift      *bool  `yaml:"record_gift,omitempty" json:"record_gift,omitempty"`         // 是否录制礼物（哔哩哔哩）
-	RecordDouyuGift *bool  `yaml:"record_douyu_gift,omitempty" json:"record_douyu_gift,omitempty"` // 是否录制礼物（斗鱼）
-	RecordDouyinGift *bool `yaml:"record_douyin_gift,omitempty" json:"record_douyin_gift,omitempty"` // 是否录制礼物（抖音）
-	RecordGuard     *bool  `yaml:"record_guard,omitempty" json:"record_guard,omitempty"`       // 是否录制上舰
-	RecordSuperChat *bool  `yaml:"record_super_chat,omitempty" json:"record_super_chat,omitempty"` // 是否录制SC
-	GuardPosition   string `yaml:"guard_position,omitempty" json:"guard_position"`     // 上舰位置: bottom-left, bottom-right, top-left, top-right
-	ScPosition      string `yaml:"sc_position,omitempty" json:"sc_position"`           // SC位置: bottom-left, bottom-right, top-left, top-right
+	Formats            []DanmakuFormat `yaml:"formats,omitempty" json:"formats,omitempty"`                           // 输出格式：ass、xml
+	UseServerTimestamp *bool           `yaml:"use_server_timestamp,omitempty" json:"use_server_timestamp,omitempty"` // XML 是否使用平台时间
+	UseCookie          *bool           `yaml:"use_cookie,omitempty" json:"use_cookie,omitempty"`                     // 弹幕连接是否使用 Cookie
+	FontSize           int             `yaml:"font_size" json:"font_size"`                                           // 字体大小 (12~120)
+	FontName           string          `yaml:"font_name" json:"font_name"`                                           // 字体名称
+	ScrollArea         string          `yaml:"scroll_area" json:"scroll_area"`                                       // 滚动区域: full(全屏), top(顶部半屏), bottom(底部半屏), quarter(1/4屏), three-quarter(3/4屏)
+	ScrollTime         int             `yaml:"scroll_time" json:"scroll_time"`                                       // 弹幕滚过屏幕的秒数 (5~20)
+	Resolution         string          `yaml:"resolution" json:"resolution"`                                         // 播放分辨率
+	Outline            *int            `yaml:"outline,omitempty" json:"outline,omitempty"`                           // 描边粗细 (0~4)，nil 表示使用默认值
+	Opacity            *int            `yaml:"opacity,omitempty" json:"opacity,omitempty"`                           // 背景透明度 (0~255)，nil 表示使用默认值
+	RecordGift         *bool           `yaml:"record_gift,omitempty" json:"record_gift,omitempty"`                   // 是否录制礼物（哔哩哔哩）
+	RecordDouyuGift    *bool           `yaml:"record_douyu_gift,omitempty" json:"record_douyu_gift,omitempty"`       // 是否录制礼物（斗鱼）
+	RecordDouyinGift   *bool           `yaml:"record_douyin_gift,omitempty" json:"record_douyin_gift,omitempty"`     // 是否录制礼物（抖音）
+	RecordGuard        *bool           `yaml:"record_guard,omitempty" json:"record_guard,omitempty"`                 // 是否录制上舰
+	RecordSuperChat    *bool           `yaml:"record_super_chat,omitempty" json:"record_super_chat,omitempty"`       // 是否录制SC
+	GuardPosition      string          `yaml:"guard_position,omitempty" json:"guard_position"`                       // 上舰位置: bottom-left, bottom-right, top-left, top-right
+	ScPosition         string          `yaml:"sc_position,omitempty" json:"sc_position"`                             // SC位置: bottom-left, bottom-right, top-left, top-right
+}
+
+// DanmakuFormat 弹幕录制输出格式。
+type DanmakuFormat string
+
+const (
+	// DanmakuFormatASS 表示 ASS 字幕输出。
+	DanmakuFormatASS DanmakuFormat = "ass"
+	// DanmakuFormatXML 表示兼容旧版的 XML 输出。
+	DanmakuFormatXML DanmakuFormat = "xml"
+)
+
+// IsValid 判断格式是否受支持。
+func (f DanmakuFormat) IsValid() bool {
+	return f == DanmakuFormatASS || f == DanmakuFormatXML
+}
+
+// NormalizeFormats 返回去重后的有效格式。
+// nil 表示未配置，按官方默认行为返回 ASS；显式空数组或全为未知值时返回空切片。
+func (d DanmakuConfig) NormalizeFormats() []DanmakuFormat {
+	if d.Formats == nil {
+		return []DanmakuFormat{DanmakuFormatASS}
+	}
+	seen := make(map[DanmakuFormat]struct{}, len(d.Formats))
+	result := make([]DanmakuFormat, 0, len(d.Formats))
+	for _, format := range d.Formats {
+		if !format.IsValid() {
+			continue
+		}
+		if _, exists := seen[format]; exists {
+			continue
+		}
+		seen[format] = struct{}{}
+		result = append(result, format)
+	}
+	return result
+}
+
+// ServerTimestampEnabled 返回 XML 是否使用服务端时间。
+func (d DanmakuConfig) ServerTimestampEnabled() bool {
+	return d.UseServerTimestamp == nil || *d.UseServerTimestamp
+}
+
+// CookieEnabled 返回弹幕连接是否使用 Cookie。
+func (d DanmakuConfig) CookieEnabled() bool {
+	return d.UseCookie == nil || *d.UseCookie
 }
 
 func BoolPtr(b bool) *bool { return &b }
-func IntPtr(i int) *int   { return &i }
+func IntPtr(i int) *int    { return &i }
 
 var defaultDanmakuConfig = DanmakuConfig{
-	FontSize:        36,
-	FontName:        "Microsoft YaHei",
-	ScrollArea:      "full",
-	ScrollTime:      10,
-	Resolution:      "1920x1080",
-	Outline:         IntPtr(1),
-	Opacity:         IntPtr(128),
-	RecordGift:       BoolPtr(true),
-	RecordDouyuGift:  BoolPtr(true),
-	RecordDouyinGift: BoolPtr(true),
-	RecordGuard:     BoolPtr(true),
-	RecordSuperChat: BoolPtr(true),
-	GuardPosition:   "bottom-left",
-	ScPosition:      "bottom-left",
+	Formats:            []DanmakuFormat{DanmakuFormatASS},
+	UseServerTimestamp: BoolPtr(true),
+	UseCookie:          BoolPtr(true),
+	FontSize:           36,
+	FontName:           "Microsoft YaHei",
+	ScrollArea:         "full",
+	ScrollTime:         10,
+	Resolution:         "1920x1080",
+	Outline:            IntPtr(1),
+	Opacity:            IntPtr(128),
+	RecordGift:         BoolPtr(true),
+	RecordDouyuGift:    BoolPtr(true),
+	RecordDouyinGift:   BoolPtr(true),
+	RecordGuard:        BoolPtr(true),
+	RecordSuperChat:    BoolPtr(true),
+	GuardPosition:      "bottom-left",
+	ScPosition:         "bottom-left",
 }
 
 // validScrollAreas 支持的滚动区域
 var validScrollAreas = map[string]bool{
-	"full":            true, // 全屏滚动
-	"top":             true, // 仅在屏幕上半部分滚动
-	"bottom":          true, // 仅在屏幕下半部分滚动
-	"quarter":         true, // 仅在屏幕上1/4部分滚动
-	"three-quarter":   true, // 仅在屏幕上3/4部分滚动
+	"full":          true, // 全屏滚动
+	"top":           true, // 仅在屏幕上半部分滚动
+	"bottom":        true, // 仅在屏幕下半部分滚动
+	"quarter":       true, // 仅在屏幕上1/4部分滚动
+	"three-quarter": true, // 仅在屏幕上3/4部分滚动
 }
 
 // validResolutions 支持的分辨率列表
@@ -145,6 +197,15 @@ func (d *DanmakuConfig) SetDefaults() {
 
 // SetDefaultsWithPlatform 将空字段设为默认值，platformKey 用于跳过不适用平台的字段。
 func (d *DanmakuConfig) SetDefaultsWithPlatform(platformKey string) {
+	if d.Formats == nil {
+		d.Formats = append([]DanmakuFormat(nil), defaultDanmakuConfig.Formats...)
+	}
+	if d.UseServerTimestamp == nil {
+		d.UseServerTimestamp = BoolPtr(defaultDanmakuConfig.ServerTimestampEnabled())
+	}
+	if d.UseCookie == nil {
+		d.UseCookie = BoolPtr(defaultDanmakuConfig.CookieEnabled())
+	}
 	if d.FontSize == 0 {
 		d.FontSize = defaultDanmakuConfig.FontSize
 	}
@@ -216,6 +277,14 @@ func (d *DanmakuConfig) Validate() error {
 // ValidateWithPlatform 验证弹幕配置参数的有效性，同时根据平台清理不适用的字段。
 func (d *DanmakuConfig) ValidateWithPlatform(platformKey string) error {
 	d.SetDefaultsWithPlatform(platformKey)
+	if len(d.Formats) == 0 {
+		return fmt.Errorf("至少选择一种弹幕输出格式，可选值: ass, xml")
+	}
+	for _, format := range d.Formats {
+		if !format.IsValid() {
+			return fmt.Errorf("不支持的弹幕输出格式: %s，可选值: ass, xml", format)
+		}
+	}
 	if d.FontSize < 12 || d.FontSize > 120 {
 		return fmt.Errorf("字体大小必须在 12~120 之间，当前值: %d", d.FontSize)
 	}
@@ -253,6 +322,28 @@ func mergeDanmakuConfig(base, override *DanmakuConfig) DanmakuConfig {
 		return *base
 	}
 	result := *base
+	if base.Formats != nil {
+		result.Formats = append([]DanmakuFormat(nil), base.Formats...)
+	}
+	if base.UseServerTimestamp != nil {
+		v := *base.UseServerTimestamp
+		result.UseServerTimestamp = &v
+	}
+	if base.UseCookie != nil {
+		v := *base.UseCookie
+		result.UseCookie = &v
+	}
+	if override.Formats != nil {
+		result.Formats = append([]DanmakuFormat(nil), override.Formats...)
+	}
+	if override.UseServerTimestamp != nil {
+		v := *override.UseServerTimestamp
+		result.UseServerTimestamp = &v
+	}
+	if override.UseCookie != nil {
+		v := *override.UseCookie
+		result.UseCookie = &v
+	}
 	if override.FontSize != 0 {
 		result.FontSize = override.FontSize
 	}
@@ -349,13 +440,13 @@ const (
 
 // CloudUpload 云上传配置
 type CloudUpload struct {
-	Enable              bool     `yaml:"enable" json:"enable"`                                               // 是否启用云上传
-	StorageName         string   `yaml:"storage_name" json:"storage_name"`                                   // 使用的 OpenList 存储名称
-	UploadPathTmpl      string   `yaml:"upload_path_tmpl" json:"upload_path_tmpl"`                           // 上传路径模板
-	DeleteAfterUpload   bool     `yaml:"delete_after_upload" json:"delete_after_upload"`                     // 上传成功后仅删除已上传的文件
-	DeleteAllAfterUpload bool    `yaml:"delete_all_after_upload" json:"delete_all_after_upload"`             // 上传成功后删除全部文件（含中间产物）
-	UploadSubtitles     bool     `yaml:"upload_subtitles" json:"upload_subtitles"`                           // 是否上传关联的 .ass 弹幕字幕文件
-	AdditionalStorages  []string `yaml:"additional_storages,omitempty" json:"additional_storages,omitempty"` // 额外存储（支持多目标上传）
+	Enable               bool     `yaml:"enable" json:"enable"`                                               // 是否启用云上传
+	StorageName          string   `yaml:"storage_name" json:"storage_name"`                                   // 使用的 OpenList 存储名称
+	UploadPathTmpl       string   `yaml:"upload_path_tmpl" json:"upload_path_tmpl"`                           // 上传路径模板
+	DeleteAfterUpload    bool     `yaml:"delete_after_upload" json:"delete_after_upload"`                     // 上传成功后仅删除已上传的文件
+	DeleteAllAfterUpload bool     `yaml:"delete_all_after_upload" json:"delete_all_after_upload"`             // 上传成功后删除全部文件（含中间产物）
+	UploadSubtitles      bool     `yaml:"upload_subtitles" json:"upload_subtitles"`                           // 是否上传关联的 ASS/XML 弹幕文件
+	AdditionalStorages   []string `yaml:"additional_storages,omitempty" json:"additional_storages,omitempty"` // 额外存储（支持多目标上传）
 }
 
 // On record finished actions.
@@ -364,15 +455,15 @@ type OnRecordFinished struct {
 	DeleteFlvAfterConvert bool         `yaml:"delete_flv_after_convert" json:"delete_flv_after_convert"`
 	CustomCommandline     string       `yaml:"custom_commandline" json:"custom_commandline"`
 	FixFlvAtFirst         bool         `yaml:"fix_flv_at_first" json:"fix_flv_at_first"`
-	SaveCover             bool         `yaml:"save_cover" json:"save_cover"`       // 保存视频第一帧作为封面图（.jpg）
-	CloudUpload           CloudUpload  `yaml:"cloud_upload" json:"cloud_upload"`   // 云上传配置
-	UploadTiming          UploadTiming `yaml:"upload_timing" json:"upload_timing"` // 上传时机
-	BurnSubtitles         bool         `yaml:"burn_subtitles" json:"burn_subtitles"`                         // 烧录弹幕字幕到视频（硬编码）
-	BurnSubtitlesCodec    string       `yaml:"burn_subtitles_codec" json:"burn_subtitles_codec"`             // 烧录用视频编码器，默认 libx264
-	BurnSubtitlesCrf      string       `yaml:"burn_subtitles_crf" json:"burn_subtitles_crf"`                 // 烧录用 CRF 质量值，默认 18
-	BurnSubtitlesPreset   string       `yaml:"burn_subtitles_preset" json:"burn_subtitles_preset"`           // 烧录用编码预设，默认 medium
-	BurnDeleteAss         bool         `yaml:"burn_delete_ass" json:"burn_delete_ass"`                       // 烧录后删除 ASS 文件
-	BurnDeleteSource      bool         `yaml:"burn_delete_source" json:"burn_delete_source"`                 // 烧录后删除源视频文件
+	SaveCover             bool         `yaml:"save_cover" json:"save_cover"`                       // 保存视频第一帧作为封面图（.jpg）
+	CloudUpload           CloudUpload  `yaml:"cloud_upload" json:"cloud_upload"`                   // 云上传配置
+	UploadTiming          UploadTiming `yaml:"upload_timing" json:"upload_timing"`                 // 上传时机
+	BurnSubtitles         bool         `yaml:"burn_subtitles" json:"burn_subtitles"`               // 烧录弹幕字幕到视频（硬编码）
+	BurnSubtitlesCodec    string       `yaml:"burn_subtitles_codec" json:"burn_subtitles_codec"`   // 烧录用视频编码器，默认 libx264
+	BurnSubtitlesCrf      string       `yaml:"burn_subtitles_crf" json:"burn_subtitles_crf"`       // 烧录用 CRF 质量值，默认 18
+	BurnSubtitlesPreset   string       `yaml:"burn_subtitles_preset" json:"burn_subtitles_preset"` // 烧录用编码预设，默认 medium
+	BurnDeleteAss         bool         `yaml:"burn_delete_ass" json:"burn_delete_ass"`             // 烧录后删除 ASS 文件
+	BurnDeleteSource      bool         `yaml:"burn_delete_source" json:"burn_delete_source"`       // 烧录后删除源视频文件
 }
 
 type Log struct {
@@ -450,11 +541,11 @@ var defaultProxy = Proxy{
 
 // OpenListConfig OpenList 服务配置
 type OpenListConfig struct {
-	Port     int    `yaml:"port" json:"port"`               // OpenList 监听端口（默认 5244）
-	DataPath string `yaml:"data_path" json:"data_path"`     // OpenList 数据目录（留空使用默认路径）
-	Username string `yaml:"username" json:"username"`        // OpenList 管理员用户名
-	Password string `yaml:"password" json:"password"`        // OpenList 管理员密码
-	Token    string `yaml:"token,omitempty" json:"token"`    // OpenList API Token（优先于用户名密码）
+	Port     int    `yaml:"port" json:"port"`             // OpenList 监听端口（默认 5244）
+	DataPath string `yaml:"data_path" json:"data_path"`   // OpenList 数据目录（留空使用默认路径）
+	Username string `yaml:"username" json:"username"`     // OpenList 管理员用户名
+	Password string `yaml:"password" json:"password"`     // OpenList 管理员密码
+	Token    string `yaml:"token,omitempty" json:"token"` // OpenList API Token（优先于用户名密码）
 }
 
 var defaultOpenListConfig = OpenListConfig{
@@ -1207,6 +1298,13 @@ func NewConfigWithBytes(b []byte) (*Config, error) {
 	if err := yaml.Unmarshal(b, &config); err != nil {
 		return nil, err
 	}
+	if err := applyDanmakuConfigMigration(b, &config); err != nil {
+		return nil, err
+	}
+	dedupeDanmakuFormats(&config)
+	if err := validateConfiguredDanmakuFormats(&config); err != nil {
+		return nil, err
+	}
 
 	// 确保映射在向后兼容时被初始化
 	if config.PlatformConfigs == nil {
@@ -1218,6 +1316,173 @@ func NewConfigWithBytes(b []byte) (*Config, error) {
 	// 在配置加载时同步平台访问频率限制器
 	config.syncPlatformRateLimits()
 	return &config, nil
+}
+
+func dedupeDanmakuFormats(config *Config) {
+	if config == nil {
+		return
+	}
+	config.Danmaku.Formats = dedupeFormats(config.Danmaku.Formats)
+	for key, platform := range config.PlatformConfigs {
+		if platform.Danmaku != nil {
+			copy := cloneDanmakuConfig(platform.Danmaku)
+			copy.Formats = dedupeFormats(copy.Formats)
+			platform.Danmaku = copy
+			config.PlatformConfigs[key] = platform
+		}
+	}
+	for i := range config.LiveRooms {
+		if config.LiveRooms[i].Danmaku != nil {
+			copy := cloneDanmakuConfig(config.LiveRooms[i].Danmaku)
+			copy.Formats = dedupeFormats(copy.Formats)
+			config.LiveRooms[i].Danmaku = copy
+		}
+	}
+}
+
+func dedupeFormats(formats []DanmakuFormat) []DanmakuFormat {
+	if formats == nil {
+		return nil
+	}
+	seen := make(map[DanmakuFormat]struct{}, len(formats))
+	result := make([]DanmakuFormat, 0, len(formats))
+	for _, format := range formats {
+		if _, exists := seen[format]; exists {
+			continue
+		}
+		seen[format] = struct{}{}
+		result = append(result, format)
+	}
+	return result
+}
+
+// validateConfiguredDanmakuFormats 校验配置文件中显式写入的格式字段。
+// nil 表示未配置、允许继承；空数组和未知值必须在加载时报告。
+func validateConfiguredDanmakuFormats(config *Config) error {
+	if config == nil {
+		return nil
+	}
+	validate := func(scope string, danmaku *DanmakuConfig) error {
+		if danmaku == nil {
+			return nil
+		}
+		if len(danmaku.Formats) == 0 && danmaku.Formats != nil {
+			return fmt.Errorf("%s.formats 至少选择一种弹幕输出格式，可选值: ass, xml", scope)
+		}
+		for _, format := range danmaku.Formats {
+			if !format.IsValid() {
+				return fmt.Errorf("%s.formats 包含不支持的格式 %q，可选值: ass, xml", scope, format)
+			}
+		}
+		return nil
+	}
+	if err := validate("danmaku", &config.Danmaku); err != nil {
+		return err
+	}
+	for key, platform := range config.PlatformConfigs {
+		if err := validate("platform_configs."+key+".danmaku", platform.Danmaku); err != nil {
+			return err
+		}
+	}
+	for i := range config.LiveRooms {
+		if err := validate(fmt.Sprintf("live_rooms[%d].danmaku", i), config.LiveRooms[i].Danmaku); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyDanmakuConfigMigration 根据原始 YAML 节点补齐旧版嵌套弹幕配置。
+// 使用原始节点是为了区分字段缺失、显式 false 和显式空数组。
+func applyDanmakuConfigMigration(data []byte, config *Config) error {
+	if config == nil {
+		return nil
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return err
+	}
+	root := document.Content
+	if len(root) == 0 || root[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	top := root[0]
+	danmakuNode := yamlMappingValue(top, "danmaku")
+	if danmakuNode == nil || danmakuNode.Kind != yaml.MappingNode {
+		return nil
+	}
+	// 旧版曾短暂支持 json 输出。保留其中的 XML/ASS 选择并丢弃 json；
+	// 仅有 json 时直接报错，避免静默生成与用户预期不符的文件。
+	if formatsNode := yamlMappingValue(danmakuNode, "formats"); formatsNode != nil && formatsNode.Kind == yaml.SequenceNode {
+		var rawFormats []string
+		if err := formatsNode.Decode(&rawFormats); err != nil {
+			return fmt.Errorf("danmaku.formats 无效: %w", err)
+		}
+		validFormats := make([]DanmakuFormat, 0, len(rawFormats))
+		hasJSON := false
+		for _, raw := range rawFormats {
+			switch DanmakuFormat(strings.ToLower(strings.TrimSpace(raw))) {
+			case DanmakuFormatASS, DanmakuFormatXML:
+				validFormats = append(validFormats, DanmakuFormat(strings.ToLower(strings.TrimSpace(raw))))
+			case DanmakuFormat("json"):
+				hasJSON = true
+			}
+		}
+		if hasJSON {
+			if len(validFormats) == 0 {
+				return fmt.Errorf("不再支持 json 弹幕输出，请改用 ass 或 xml")
+			}
+			config.Danmaku.Formats = validFormats
+		}
+	}
+
+	// 新结构显式字段优先，旧版 enable 只在顶层字段缺失时迁移。
+	if yamlMappingValue(top, "danmaku_enable") == nil {
+		if legacyEnable := yamlMappingValue(danmakuNode, "enable"); legacyEnable != nil {
+			var enabled bool
+			if err := legacyEnable.Decode(&enabled); err != nil {
+				return fmt.Errorf("旧版 danmaku.enable 无效: %w", err)
+			}
+			config.DanmakuEnable = enabled
+		}
+	}
+
+	legacy := false
+	for _, key := range []string{"enable", "save_gift", "use_server_timestamp", "use_cookie"} {
+		if yamlMappingValue(danmakuNode, key) != nil {
+			legacy = true
+			break
+		}
+	}
+	if legacy {
+		if yamlMappingValue(danmakuNode, "formats") == nil {
+			config.Danmaku.Formats = []DanmakuFormat{DanmakuFormatXML}
+		}
+		if saveGift := yamlMappingValue(danmakuNode, "save_gift"); saveGift != nil {
+			var enabled bool
+			if err := saveGift.Decode(&enabled); err != nil {
+				return fmt.Errorf("旧版 danmaku.save_gift 无效: %w", err)
+			}
+			config.Danmaku.RecordGift = BoolPtr(enabled)
+			config.Danmaku.RecordDouyuGift = BoolPtr(enabled)
+			config.Danmaku.RecordDouyinGift = BoolPtr(enabled)
+			config.Danmaku.RecordGuard = BoolPtr(enabled)
+		}
+	}
+	return nil
+}
+
+// yamlMappingValue 返回 YAML mapping 中指定键对应的值节点。
+func yamlMappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
 }
 
 func NewConfigWithFile(file string) (*Config, error) {
@@ -1236,10 +1501,6 @@ func NewConfigWithFile(file string) (*Config, error) {
 		return nil, err
 	}
 	config.File = file
-	// 可能会修改配置文件（添加缺失字段等），保存回去
-	if err := config.Marshal(); err != nil {
-		return nil, err
-	}
 	return config, nil
 }
 
@@ -1291,10 +1552,24 @@ func CloneConfigShallow(src *Config) *Config {
 		return nil
 	}
 	cp := *src // 先按值复制（浅拷贝）
+	if src.Danmaku.Formats != nil {
+		cp.Danmaku.Formats = append([]DanmakuFormat(nil), src.Danmaku.Formats...)
+	}
+	if src.Danmaku.UseServerTimestamp != nil {
+		v := *src.Danmaku.UseServerTimestamp
+		cp.Danmaku.UseServerTimestamp = &v
+	}
+	if src.Danmaku.UseCookie != nil {
+		v := *src.Danmaku.UseCookie
+		cp.Danmaku.UseCookie = &v
+	}
 	// 切片拷贝
 	if src.LiveRooms != nil {
 		cp.LiveRooms = make([]LiveRoom, len(src.LiveRooms))
 		copy(cp.LiveRooms, src.LiveRooms)
+		for i := range cp.LiveRooms {
+			cp.LiveRooms[i].Danmaku = cloneDanmakuConfig(src.LiveRooms[i].Danmaku)
+		}
 	}
 	// map 拷贝
 	if src.Cookies != nil {
@@ -1307,6 +1582,7 @@ func CloneConfigShallow(src *Config) *Config {
 	if src.PlatformConfigs != nil {
 		cp.PlatformConfigs = make(map[string]PlatformConfig, len(src.PlatformConfigs))
 		for k, v := range src.PlatformConfigs {
+			v.Danmaku = cloneDanmakuConfig(v.Danmaku)
 			cp.PlatformConfigs[k] = v
 		}
 	}
@@ -1318,6 +1594,26 @@ func CloneConfigShallow(src *Config) *Config {
 		}
 	} else {
 		cp.liveRoomIndexCache = map[string]int{}
+	}
+	return &cp
+}
+
+// cloneDanmakuConfig 复制可被层级配置更新的弹幕配置，避免更新时共享切片和指针。
+func cloneDanmakuConfig(src *DanmakuConfig) *DanmakuConfig {
+	if src == nil {
+		return nil
+	}
+	cp := *src
+	if src.Formats != nil {
+		cp.Formats = append([]DanmakuFormat(nil), src.Formats...)
+	}
+	if src.UseServerTimestamp != nil {
+		v := *src.UseServerTimestamp
+		cp.UseServerTimestamp = &v
+	}
+	if src.UseCookie != nil {
+		v := *src.UseCookie
+		cp.UseCookie = &v
 	}
 	return &cp
 }
@@ -1532,7 +1828,8 @@ func (c *Config) ValidatePlatformConfigs() error {
 
 		// 验证弹幕配置（如果指定）
 		if platformConfig.Danmaku != nil {
-			if err := platformConfig.Danmaku.ValidateWithPlatform(platformKey); err != nil {
+			candidate := *platformConfig.Danmaku
+			if err := candidate.ValidateWithPlatform(platformKey); err != nil {
 				return fmt.Errorf("平台 '%s': 弹幕配置无效: %w", platformKey, err)
 			}
 		}

@@ -17,6 +17,7 @@ type AssWriter struct {
 	file         *os.File
 	closed       bool
 	writeErr     bool // 首次写入出错后置 true，后续跳过无意义写入
+	lastErr      error
 	startAt      time.Time
 	cfg          configs.DanmakuConfig
 	title        string
@@ -273,6 +274,7 @@ func (w *AssWriter) AddDanmaku(recvAt time.Time, username, text string, color in
 		formatTime(startCS), formatTime(endCS), marginV, w.bannerSpeed, assColor, escapeText(fullText))
 	if _, err := w.file.WriteString(line); err != nil {
 		w.writeErr = true
+		w.lastErr = err
 	}
 }
 
@@ -320,6 +322,7 @@ func (w *AssWriter) AddGift(recvAt time.Time, username, giftName string, num int
 		formatTime(startCS), formatTime(endCS), marginV, w.bannerSpeed, escapeText(fullText))
 	if _, err := w.file.WriteString(line); err != nil {
 		w.writeErr = true
+		w.lastErr = err
 	}
 }
 
@@ -359,6 +362,7 @@ func (w *AssWriter) AddGuard(recvAt time.Time, username, giftName string, price 
 		formatTime(startCS), formatTime(endCS), marginV, alignment, escapeText(fullText))
 	if _, err := w.file.WriteString(line); err != nil {
 		w.writeErr = true
+		w.lastErr = err
 	}
 }
 
@@ -384,7 +388,15 @@ func (w *AssWriter) AddSuperChat(recvAt time.Time, username, text string, price 
 		formatTime(startCS), formatTime(endCS), styleName, marginV, alignment, escapeText(fullText))
 	if _, err := w.file.WriteString(line); err != nil {
 		w.writeErr = true
+		w.lastErr = err
 	}
+}
+
+// WriteError 返回 ASS 最近一次写入错误。
+func (w *AssWriter) WriteError() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.lastErr
 }
 
 // assignLane 分配一个空闲 lane，基于文字宽度的防重叠。

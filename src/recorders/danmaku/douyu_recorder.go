@@ -20,6 +20,7 @@ type DouyuDanmakuRecorder struct {
 
 // NewDouyuDanmakuRecorder 创建斗鱼弹幕录制器
 func NewDouyuDanmakuRecorder(roomID, cookies, outputFile string, cfg configs.DanmakuConfig, logger *logrus.Entry) *DouyuDanmakuRecorder {
+	cfg.SetDefaultsWithPlatform("douyu")
 	return &DouyuDanmakuRecorder{
 		baseRecorder: baseRecorder{
 			outputFile: outputFile,
@@ -42,24 +43,33 @@ func (r *DouyuDanmakuRecorder) Start(ctx context.Context) error {
 
 	startAt := time.Now()
 
-	assWriter, err := NewAssWriter(r.outputFile, startAt, r.cfg, "Douyu Danmaku")
-	if err != nil {
+	if err := r.initWriters(startAt, "斗鱼", r.roomID, "Douyu Danmaku"); err != nil {
 		return err
 	}
-	r.assWriter = assWriter
 	r.startAt = startAt
 
-	var onGift func(username, giftName string, num int)
-	if r.cfg.RecordDouyuGift != nil && *r.cfg.RecordDouyuGift {
-		onGift = func(username, giftName string, num int) {
-			r.addGift(time.Now(), username, giftName, num, 0, "")
-		}
+	cookies := r.cookies
+	if !r.cfg.CookieEnabled() {
+		cookies = ""
+	}
+	r.client = douyu.NewDouyuClient(r.roomID, cookies, nil, nil, r.logger)
+	r.client.OnDanmakuEvent(func(msg douyu.DanmakuEvent) {
+		recvAt := time.Now()
+		r.addEvent(Event{Type: EventComment, ReceivedAt: recvAt, EventTimestamp: msg.Timestamp, Text: msg.Content, Color: msg.Color, Mode: 1, UID: msg.UID, Username: msg.Username}, "danmaku", map[string]interface{}{
+			"color": msg.Color, "timestamp": recvAt.Unix(), "uid": msg.UID,
+		})
+	})
+	if r.cfg.RecordDouyuGift == nil || *r.cfg.RecordDouyuGift {
+		r.client.OnGiftEvent(func(msg douyu.GiftEvent) {
+			recvAt := time.Now()
+			r.addEvent(Event{Type: EventGift, ReceivedAt: recvAt, EventTimestamp: msg.Timestamp, Name: msg.GiftName, Count: int64(msg.Count), UID: msg.UID, Username: msg.Username}, "gift", map[string]interface{}{
+				"gift_name": msg.GiftName, "num": msg.Count, "timestamp": recvAt.Unix(), "uid": msg.UID,
+			})
+		})
 	}
 
-	r.client = douyu.NewDouyuClient(r.roomID, r.cookies, r.onDanmaku, onGift, r.logger)
-
 	if err := r.client.Start(ctx); err != nil {
-		assWriter.Close()
+		r.discardWritersLocked()
 		return err
 	}
 
@@ -77,13 +87,6 @@ func (r *DouyuDanmakuRecorder) Stop() {
 	if c != nil {
 		c.Stop()
 	}
-	if w != nil {
-		w.Close()
-	}
-	r.logger.Infof("斗鱼弹幕录制已停止，共录制 %d 条弹幕", r.GetCount())
-}
-
-// onDanmaku 弹幕回调
-func (r *DouyuDanmakuRecorder) onDanmaku(username, content string, color int) {
-	r.addDanmaku(time.Now(), username, content, color)
+	r.closeWriters(w)
+	r.logger.Infof("斗鱼弹幕录制已停止，共录制 %d 条弹幕，输出文件: %v", r.GetCount(), r.OutputFiles())
 }

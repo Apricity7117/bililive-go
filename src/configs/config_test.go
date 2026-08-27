@@ -147,6 +147,82 @@ live_rooms:
 	assert.Equal(t, "./", resolved.OutPutPath)
 }
 
+func TestDanmakuFormatsMigrationAndValidation(t *testing.T) {
+	withoutFormats, err := NewConfigWithBytes([]byte(`
+danmaku:
+  font_size: 40
+`))
+	assert.NoError(t, err)
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatASS}, withoutFormats.Danmaku.Formats)
+
+	legacy, err := NewConfigWithBytes([]byte(`
+danmaku:
+  enable: true
+  save_gift: false
+`))
+	assert.NoError(t, err)
+	assert.True(t, legacy.DanmakuEnable)
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, legacy.Danmaku.Formats)
+	assert.False(t, *legacy.Danmaku.RecordGift)
+
+	legacyTimestampOnly, err := NewConfigWithBytes([]byte(`
+danmaku:
+  use_server_timestamp: false
+`))
+	assert.NoError(t, err)
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, legacyTimestampOnly.Danmaku.Formats)
+	assert.False(t, legacyTimestampOnly.Danmaku.ServerTimestampEnabled())
+
+	jsonOnly, err := NewConfigWithBytes([]byte(`
+danmaku:
+  formats: [json]
+`))
+	assert.Error(t, err)
+	assert.Nil(t, jsonOnly)
+
+	empty, err := NewConfigWithBytes([]byte(`
+danmaku:
+  formats: []
+`))
+	assert.ErrorContains(t, err, "至少选择一种")
+	assert.Nil(t, empty)
+
+	unknown, err := NewConfigWithBytes([]byte(`
+danmaku:
+  formats: [yaml]
+`))
+	assert.ErrorContains(t, err, "不支持的格式")
+	assert.Nil(t, unknown)
+}
+
+func TestDanmakuConfigInheritance(t *testing.T) {
+	global := GetDefaultDanmakuConfig()
+	global.Formats = []DanmakuFormat{DanmakuFormatASS}
+	platformFormats := []DanmakuFormat{DanmakuFormatXML}
+	platformCookie := false
+	platformFontSize := 48
+	room := &LiveRoom{Url: "https://live.bilibili.com/123"}
+	room.Danmaku = &DanmakuConfig{Formats: []DanmakuFormat{DanmakuFormatASS}}
+	cfg := &Config{
+		Danmaku: global,
+		PlatformConfigs: map[string]PlatformConfig{
+			"bilibili": {OverridableConfig: OverridableConfig{Danmaku: &DanmakuConfig{
+				Formats: platformFormats, UseCookie: &platformCookie, FontSize: platformFontSize,
+			}}},
+		},
+	}
+
+	resolved := cfg.ResolveConfigForRoom(room, "bilibili")
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatASS}, resolved.Danmaku.Formats)
+	assert.Equal(t, platformFontSize, resolved.Danmaku.FontSize)
+	assert.NotNil(t, resolved.Danmaku.UseCookie)
+	assert.False(t, *resolved.Danmaku.UseCookie)
+
+	room.Danmaku = &DanmakuConfig{}
+	resolved = cfg.ResolveConfigForRoom(room, "bilibili")
+	assert.Equal(t, platformFormats, resolved.Danmaku.Formats)
+}
+
 func TestGetPlatformKeyFromUrl(t *testing.T) {
 	tests := []struct {
 		url      string

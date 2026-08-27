@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  Card, Form, Switch, InputNumber, Select, Button, message, Spin, Collapse, Tag, Popconfirm, Space, Input
+  Card, Form, Switch, InputNumber, Select, Button, message, Spin, Collapse, Tag, Popconfirm, Space, Input, Checkbox
 } from 'antd';
 import { UndoOutlined } from '@ant-design/icons';
 import API from '../../utils/api';
@@ -8,6 +8,9 @@ import API from '../../utils/api';
 const api = new API();
 
 const DEFAULT_DANMAKU: DanmakuConfig = {
+  formats: ['ass'],
+  use_server_timestamp: true,
+  use_cookie: true,
   font_size: 36,
   font_name: 'Microsoft YaHei',
   scroll_area: 'full',
@@ -25,6 +28,9 @@ const DEFAULT_DANMAKU: DanmakuConfig = {
 };
 
 interface DanmakuConfig {
+  formats: string[];
+  use_server_timestamp: boolean;
+  use_cookie: boolean;
   font_size: number;
   font_name: string;
   scroll_area: string;
@@ -83,6 +89,7 @@ const DanmakuParamForm: React.FC<{
   showDouyinContent?: boolean;
 }> = ({ initialValues, globalDefaults, onSave, onReset, loading, showEnable, danmakuEnable, label, isRoom, showBilibiliContent, showDouyuContent, showDouyinContent }) => {
   const [form] = Form.useForm();
+  const formats = Form.useWatch(['danmaku', 'formats'], form) || ['ass'];
 
   const baseDefaults = useMemo(() => globalDefaults || DEFAULT_DANMAKU, [globalDefaults]);
 
@@ -139,7 +146,35 @@ const DanmakuParamForm: React.FC<{
           <Switch />
         </Form.Item>
       )}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px' }}>
+      <Form.Item
+        label="输出格式"
+        name={['danmaku', 'formats']}
+        rules={[{ validator: async (_, value: string[]) => {
+          if (!Array.isArray(value) || value.length === 0) throw new Error('至少选择一种输出格式');
+        }}]}
+        extra="可同时生成 ASS 字幕和兼容旧版的 XML 弹幕文件"
+      >
+        <Checkbox.Group options={[{ label: 'ASS 字幕', value: 'ass' }, { label: 'XML 弹幕', value: 'xml' }]} />
+      </Form.Item>
+      {formats.includes('xml') && (
+        <Form.Item
+          label="使用服务器时间"
+          name={['danmaku', 'use_server_timestamp']}
+          valuePropName="checked"
+          extra="关闭后 XML 使用本机收到消息的时间；ASS 始终使用本机时间"
+        >
+          <Switch />
+        </Form.Item>
+      )}
+      <Form.Item
+        label="使用 Cookie"
+        name={['danmaku', 'use_cookie']}
+        valuePropName="checked"
+        extra="弹幕连接使用已配置的 Cookie；关闭后使用匿名连接"
+      >
+        <Switch />
+      </Form.Item>
+      <div style={{ display: formats.includes('ass') ? 'grid' : 'none', gridTemplateColumns: '1fr 1fr', gap: '0 24px' }}>
         <Form.Item
           label={<span>字体大小 <span style={{ fontWeight: 400, fontSize: 12, color: '#999' }}>弹幕文字的像素大小，12~120</span></span>}
           name={['danmaku', 'font_size']}

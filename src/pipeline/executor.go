@@ -12,6 +12,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/pkg/metadata"
 	bilisentry "github.com/bililive-go/bililive-go/src/pkg/sentry"
+	"github.com/bililive-go/bililive-go/src/pkg/sidecar"
 	"github.com/sirupsen/logrus"
 )
 
@@ -251,7 +252,7 @@ func (e *Executor) Execute(
 // deleteMarkedFiles 删除标记为 Deletable 或 Metadata["uploaded"] 的文件，返回保留的文件列表
 func (e *Executor) deleteMarkedFiles(files []FileInfo) []FileInfo {
 	var kept []FileInfo
-	deleteAll := false  // 标记是否为 deleteAll 模式
+	deleteAll := false   // 标记是否为 deleteAll 模式
 	deleteAfter := false // 标记是否为 deleteAfter 模式（仅删除已上传文件）
 
 	// 获取输出路径用于计算相对路径（清理 DB 上传标记）
@@ -300,8 +301,8 @@ func (e *Executor) deleteMarkedFiles(files []FileInfo) []FileInfo {
 		}
 	}
 
-	// 清理无关联视频文件的孤立 .ass 文件
-	// deleteAll 模式下删除所有文件（含 .ass），deleteAfter 模式下删除已上传视频后也应清理残留 .ass
+	// 清理无关联视频文件的孤立 ASS/XML 文件
+	// deleteAll 模式下删除所有文件（含侧车），deleteAfter 模式下删除已上传视频后也应清理残留侧车。
 	if deleteAll || deleteAfter {
 		kept = e.cleanupOrphanedAssFiles(files, kept)
 	}
@@ -309,7 +310,7 @@ func (e *Executor) deleteMarkedFiles(files []FileInfo) []FileInfo {
 	return kept
 }
 
-// cleanupOrphanedAssFiles 清理无关联视频文件的 .ass 文件
+// cleanupOrphanedAssFiles 清理无关联视频文件的 ASS/XML 文件
 // allFiles: 原始文件列表（含已删除的视频），用于确定扫描目录
 // keptFiles: 保留的文件列表，用于检查 Pipeline 内的 .ass 文件
 func (e *Executor) cleanupOrphanedAssFiles(allFiles []FileInfo, keptFiles []FileInfo) []FileInfo {
@@ -317,25 +318,16 @@ func (e *Executor) cleanupOrphanedAssFiles(allFiles []FileInfo, keptFiles []File
 	videoBaseNames := map[string]bool{}
 	dirs := map[string]bool{}
 	for _, f := range allFiles {
-		ext := strings.ToLower(filepath.Ext(f.Path))
-		if ext == ".flv" || ext == ".mp4" || ext == ".mkv" || ext == ".ts" {
+		if sidecar.IsVideo(f.Path) {
 			dir := filepath.Dir(f.Path)
-			base := strings.TrimSuffix(filepath.Base(f.Path), ext)
+			base := sidecar.Base(f.Path)
 			videoBaseNames[filepath.Join(dir, base)] = true
 			dirs[dir] = true
 		}
 	}
 
-	// 收集 Pipeline 中已知的 .ass 文件路径
-	knownAssFiles := map[string]bool{}
-	for _, f := range keptFiles {
-		if strings.ToLower(filepath.Ext(f.Path)) == ".ass" {
-			knownAssFiles[f.Path] = true
-		}
-	}
-
-	// 扫描目录中的 .ass 文件
-	// 通过视频基名匹配判断 .ass 是否属于本任务，避免误删其他任务或用户放置的字幕
+	// 扫描目录中的 ASS/XML 文件
+	// 通过视频基名匹配判断侧车是否属于本任务，避免误删其他任务或用户放置的文件。
 	for dir := range dirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -345,61 +337,65 @@ func (e *Executor) cleanupOrphanedAssFiles(allFiles []FileInfo, keptFiles []File
 			if entry.IsDir() {
 				continue
 			}
-			if strings.ToLower(filepath.Ext(entry.Name())) != ".ass" {
+			if !sidecar.IsDanmaku(entry.Name()) {
 				continue
 			}
 			assPath := filepath.Join(dir, entry.Name())
-			if knownAssFiles[assPath] {
-				continue // 已在 Pipeline 中处理
-			}
 			// 通过基名匹配判断是否属于本任务的视频文件
 			// （.ass 文件可能未被传入 Pipeline，不能依赖文件列表过滤）
-			base := strings.TrimSuffix(entry.Name(), ".ass")
-			key := filepath.Join(dir, base)
-			if !videoBaseNames[key] {
-				continue // 基名不匹配任何本任务视频，跳过
-			}
-			// 检查磁盘上是否有同名视频文件
-			hasVideo := false
-			for _, ext := range []string{".flv", ".mp4", ".mkv", ".ts"} {
-				if _, err := os.Stat(key + ext); err == nil {
-					hasVideo = true
+			base := sidecar.Base(entry.Name())
+			associated := false
+			for videoKey := range videoBaseNames {
+				videoBase := sidecar.Base(videoKey)
+				if filepath.Dir(videoKey) == dir && (sidecar.AssociatedBase(videoBase, base) || sidecar.IsPartBase(base, videoBase)) {
+					associated = true
 					break
 				}
 			}
+			if !associated {
+				continue // 基名不匹配任何本任务视频，跳过
+			}
+			// 检查磁盘上是否有同名视频文件
+			hasVideo := sidecar.HasVideoForBase(dir, base)
 			if !hasVideo {
 				if err := os.Remove(assPath); err != nil {
 					if !os.IsNotExist(err) {
-						e.logger.Warnf("pipeline cleanup: 删除孤立 .ass 文件失败 %s: %v", assPath, err)
+						e.logger.Warnf("pipeline cleanup: 删除孤立弹幕文件失败 %s: %v", assPath, err)
 					}
 				} else {
-					e.logger.Infof("pipeline cleanup: 已删除孤立 .ass 文件 %s（无关联视频）", assPath)
+					e.logger.Infof("pipeline cleanup: 已删除孤立弹幕文件 %s（无关联视频）", assPath)
 				}
 			}
 		}
 	}
 
-	// 处理 Pipeline 中的 .ass 文件
+	// 处理 Pipeline 中的 ASS/XML 文件
 	var kept []FileInfo
 	for _, f := range keptFiles {
-		ext := strings.ToLower(filepath.Ext(f.Path))
-		if ext == ".ass" {
-			// 先检查 .ass 是否还在磁盘上（可能已被 deleteMarkedFiles 删除）
+		if sidecar.IsDanmaku(f.Path) {
+			// 先检查侧车是否还在磁盘上（可能已被 deleteMarkedFiles 删除）
 			if _, err := os.Stat(f.Path); os.IsNotExist(err) {
 				continue // 已被删除，不加入 kept
 			}
 			dir := filepath.Dir(f.Path)
-			base := strings.TrimSuffix(filepath.Base(f.Path), ".ass")
-			key := filepath.Join(dir, base)
-			if !videoBaseNames[key] {
-				// 无关联视频文件，删除 .ass
+			base := sidecar.Base(f.Path)
+			associated := false
+			for videoKey := range videoBaseNames {
+				videoBase := sidecar.Base(videoKey)
+				if filepath.Dir(videoKey) == dir && (sidecar.AssociatedBase(videoBase, base) || sidecar.IsPartBase(base, videoBase)) {
+					associated = true
+					break
+				}
+			}
+			if !associated {
+				// 无关联视频文件，删除侧车
 				if err := os.Remove(f.Path); err != nil {
 					if !os.IsNotExist(err) {
-						e.logger.Warnf("pipeline cleanup: 删除孤立 .ass 文件失败 %s: %v", f.Path, err)
+						e.logger.Warnf("pipeline cleanup: 删除孤立弹幕文件失败 %s: %v", f.Path, err)
 					}
 					kept = append(kept, f) // 删除失败则保留
 				} else {
-					e.logger.Infof("pipeline cleanup: 已删除孤立 .ass 文件 %s（无关联视频）", f.Path)
+					e.logger.Infof("pipeline cleanup: 已删除孤立弹幕文件 %s（无关联视频）", f.Path)
 				}
 			} else {
 				kept = append(kept, f)

@@ -36,6 +36,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/pkg/parser/ffmpeg"
 	"github.com/bililive-go/bililive-go/src/pkg/parser/native/flv"
 	bilisentry "github.com/bililive-go/bililive-go/src/pkg/sentry"
+	"github.com/bililive-go/bililive-go/src/pkg/sidecar"
 	"github.com/bililive-go/bililive-go/src/pkg/streamprobe"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
 	"github.com/bililive-go/bililive-go/src/recorders/danmaku"
@@ -76,18 +77,26 @@ var (
 	}
 )
 
-// videoExtensions 用于匹配弹幕文件对应的视频文件
-var videoExtensions = []string{".flv", ".mkv", ".ts", ".mp4"}
-
-// cleanupOrphanedDanmakuFiles 清理没有对应视频文件的 ASS 弹幕文件。
-// 视频流快速失败时（如 404），弹幕录制器可能已创建 .ass 文件但视频未生成，
-// 遗留的孤立 .ass 文件会在前端显示为无效录制，需要清理。
-func cleanupOrphanedDanmakuFiles(assFile string) {
-	if assFile == "" {
+// cleanupOrphanedDanmakuFiles 清理没有对应视频文件的 ASS/XML 弹幕文件。
+// 视频流快速失败时（如 404），弹幕录制器可能已创建侧车但视频未生成，
+// 遗留的孤立文件会在前端显示为无效录制，需要清理。
+func cleanupOrphanedDanmakuFiles(paths ...string) {
+	if len(paths) == 0 {
 		return
 	}
-	dir := filepath.Dir(assFile)
-	base := strings.TrimSuffix(filepath.Base(assFile), ".ass")
+	baseNames := make(map[string]bool)
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)); base != "" {
+			baseNames[base] = true
+		}
+	}
+	if len(baseNames) == 0 {
+		return
+	}
+	dir := filepath.Dir(paths[0])
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -99,21 +108,22 @@ func cleanupOrphanedDanmakuFiles(assFile string) {
 		}
 		name := entry.Name()
 		ext := strings.ToLower(filepath.Ext(name))
-		if ext == ".ass" {
-			assBase := strings.TrimSuffix(name, ".ass")
-			if assBase != base && !strings.HasPrefix(assBase, base+"_PART") {
-				continue
-			}
-			// 检查是否有同名视频文件
-			hasVideo := false
-			for _, vext := range videoExtensions {
-				if _, err := os.Stat(filepath.Join(dir, assBase+vext)); err == nil {
-					hasVideo = true
+		if ext == ".ass" || ext == ".xml" {
+			assBase := strings.TrimSuffix(name, filepath.Ext(name))
+			matched := false
+			for base := range baseNames {
+				if sidecar.AssociatedBase(base, assBase) || sidecar.IsPartBase(assBase, base) {
+					matched = true
 					break
 				}
 			}
+			if !matched {
+				continue
+			}
+			// 检查是否有同名视频或录播姬分段视频。
+			hasVideo := sidecar.HasVideoForBase(dir, assBase)
 			if !hasVideo {
-				os.Remove(filepath.Join(dir, name))
+				_ = os.Remove(filepath.Join(dir, name))
 			}
 		}
 	}
@@ -252,6 +262,7 @@ type danmakuRecorder interface {
 	Start(ctx context.Context) error
 	Stop()
 	OutputFile() string
+	OutputFiles() []string
 	GetCount() int
 	IsRunning() bool
 	GetStatus() map[string]interface{}
@@ -269,15 +280,15 @@ var (
 // 分段重启时新旧 recorder 通过 redirect 链共享同一份状态，
 // 确保旧任务的回调能正确递减新 recorder 的计数器
 type pipelineSharedState struct {
-	mu             sync.Mutex
-	pendingCount   int                          // 尚未完成的 Pipeline 任务数
-	enqueued       bool                         // 是否有 Pipeline 任务已入队
-	summarySent    bool                         // 摘要是否已发送（幂等保护）
-	runExited      bool                         // run() 是否已退出（defer 中置位，回调中检查）
-	details        []notify.RecordingFileDetail // 收集的文件详情
-	sourceNames    map[string]bool              // 被 Pipeline 消费的原始文件名（用于合并时排除已删除的源文件）
-	onAllTasksDone func()                       // 所有任务完成时的回调（分段重启时设置）
-	suppressSummary bool                        // 为 true 时，run() 退出不推送摘要（分段重启场景），用 mu 保护
+	mu              sync.Mutex
+	pendingCount    int                                 // 尚未完成的 Pipeline 任务数
+	enqueued        bool                                // 是否有 Pipeline 任务已入队
+	summarySent     bool                                // 摘要是否已发送（幂等保护）
+	runExited       bool                                // run() 是否已退出（defer 中置位，回调中检查）
+	details         []notify.RecordingFileDetail        // 收集的文件详情
+	sourceNames     map[string]bool                     // 被 Pipeline 消费的原始文件名（用于合并时排除已删除的源文件）
+	onAllTasksDone  func()                              // 所有任务完成时的回调（分段重启时设置）
+	suppressSummary bool                                // 为 true 时，run() 退出不推送摘要（分段重启场景），用 mu 保护
 	redirectedTo    atomic.Pointer[pipelineSharedState] // 分段重启时重定向到新 recorder 的共享状态
 }
 
@@ -366,14 +377,14 @@ func NewRecorder(ctx context.Context, live live.Live) (Recorder, error) {
 	inst := instance.GetInstance(ctx)
 
 	return &recorder{
-		Live:            live,
-		cache:           inst.Cache,
-		startTime:       time.Now(),
-		ed:              inst.EventDispatcher.(events.Dispatcher),
-		state:           begin,
-		stop:            make(chan struct{}),
-		done:            make(chan struct{}),
-		parserLock:      new(sync.RWMutex),
+		Live:       live,
+		cache:      inst.Cache,
+		startTime:  time.Now(),
+		ed:         inst.EventDispatcher.(events.Dispatcher),
+		state:      begin,
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+		parserLock: new(sync.RWMutex),
 		pipelineState: &pipelineSharedState{
 			sourceNames: make(map[string]bool),
 		},
@@ -681,9 +692,9 @@ func (r *recorder) tryRecord(ctx context.Context) {
 	r.currentFileLock.RLock()
 	dmRec := r.danmakuRec
 	r.currentFileLock.RUnlock()
-	dmFile := ""
+	var dmFiles []string
 	if dmRec != nil {
-		dmFile = dmRec.OutputFile()
+		dmFiles = dmRec.OutputFiles()
 		dmRec.Stop()
 	}
 
@@ -691,13 +702,13 @@ func (r *recorder) tryRecord(ctx context.Context) {
 		r.getLogger().WithError(err).Error("failed to parse live stream")
 		// 视频流快速失败时（如 404），清理没有对应视频文件的残留弹幕
 		if elapsed := time.Since(r.startTime); elapsed < 5*time.Second {
-			cleanupOrphanedDanmakuFiles(dmFile)
+			cleanupOrphanedDanmakuFiles(dmFiles...)
 		}
 		return
 	}
 
 	// 录制成功，累积弹幕文件
-	if dmFile != "" {
+	for _, dmFile := range dmFiles {
 		if fi, dmErr := os.Stat(dmFile); dmErr == nil && fi.Size() > 0 {
 			r.accumulateRecordedFiles(dmFile)
 		}
@@ -890,6 +901,19 @@ func (r *recorder) startDanmakuRecorder(ctx context.Context, fileName, platform 
 
 	r.getLogger().Infof("弹幕录制已启用，房间ID: %s, 输出: %s", roomID, assFile)
 	rec := factory(roomID, cookies, assFile, resolvedConfig.Danmaku, r.getLogger().Entry)
+	if metadataSetter, ok := rec.(interface{ SetXMLMetadata(danmaku.XMLMetadata) }); ok {
+		metadata := danmaku.XMLMetadata{}
+		if obj, cacheErr := r.cache.Get(r.Live); cacheErr == nil {
+			if info, infoOK := obj.(*live.Info); infoOK {
+				metadata.RoomTitle = info.RoomName
+				metadata.UserName = info.HostName
+			}
+		}
+		if liveStart := r.Live.GetLastStartTime(); !liveStart.IsZero() {
+			metadata.LiveStartTime = liveStart.UnixMilli()
+		}
+		metadataSetter.SetXMLMetadata(metadata)
+	}
 	if dmErr := rec.Start(ctx); dmErr != nil {
 		r.getLogger().WithError(dmErr).Warn("弹幕录制启动失败，继续录制视频")
 		return
@@ -1022,12 +1046,21 @@ func (r *recorder) run(ctx context.Context) {
 func (r *recorder) accumulateRecordedFiles(files ...string) {
 	r.recordedFilesMu.Lock()
 	defer r.recordedFilesMu.Unlock()
+	existing := make(map[string]bool, len(r.recordedFiles))
+	for _, detail := range r.recordedFiles {
+		existing[detail.Name] = true
+	}
 	for _, f := range files {
+		name := filepath.Base(f)
+		if existing[name] {
+			continue
+		}
 		if fi, err := os.Stat(f); err == nil {
 			r.recordedFiles = append(r.recordedFiles, notify.RecordingFileDetail{
-				Name: filepath.Base(f),
+				Name: name,
 				Size: fi.Size(),
 			})
+			existing[name] = true
 		}
 	}
 }
@@ -1113,8 +1146,8 @@ func (r *recorder) sendAccumulatedSummary() {
 			r.getLogger(),
 			hostName,
 			platform,
-			r.recordedFiles,     // originalFiles（allUploaded 时显示用）
-			merged,              // finalFiles（含未入队分段的文件）
+			r.recordedFiles, // originalFiles（allUploaded 时显示用）
+			merged,          // finalFiles（含未入队分段的文件）
 			outputPath,
 		)
 	} else {
@@ -1257,7 +1290,7 @@ func collectSourceNames(sourceNames map[string]bool, fileSets ...[]pipeline.File
 	}
 }
 
-// filterOrphanedAssFromDetails 从文件详情列表中移除无关联视频的 .ass 文件
+// filterOrphanedAssFromDetails 从文件详情列表中移除无关联视频的 ASS/XML 文件
 // 当 DAA/executor 删除了视频但 .ass 从 recordedFiles 加入 merged 时，
 // 需要清理这些孤立的 .ass，避免通知误显为本地保留
 func filterOrphanedAssFromDetails(details []notify.RecordingFileDetail) []notify.RecordingFileDetail {
@@ -1273,9 +1306,18 @@ func filterOrphanedAssFromDetails(details []notify.RecordingFileDetail) []notify
 	var result []notify.RecordingFileDetail
 	for _, d := range details {
 		ext := strings.ToLower(filepath.Ext(d.Name))
-		if ext == ".ass" {
-			base := strings.TrimSuffix(d.Name, ".ass")
-			if !videoBases[base] {
+		if ext == ".ass" || ext == ".xml" {
+			base := strings.TrimSuffix(d.Name, filepath.Ext(d.Name))
+			associated := videoBases[base]
+			if !associated {
+				for videoBase := range videoBases {
+					if sidecar.IsPartBase(videoBase, base) {
+						associated = true
+						break
+					}
+				}
+			}
+			if !associated {
 				continue // 无关联视频，跳过
 			}
 		}

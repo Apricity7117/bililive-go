@@ -272,6 +272,23 @@ func TestDeleteMarkedFiles_FileNotExist(t *testing.T) {
 	assert.Equal(t, "/nonexistent/file.mp4", kept[0].Path)
 }
 
+func TestCleanupOrphanedAssFiles_RemovesRootSidecarAfterPartVideoDeleted(t *testing.T) {
+	tmpDir := t.TempDir()
+	partVideo := createTempFile(t, tmpDir, "record_PART000.flv")
+	rootXML := createTempFile(t, tmpDir, "record.xml")
+
+	// 模拟 deleteMarkedFiles 已经删除 PART 视频，但 Pipeline 仍保留其根侧车。
+	require.NoError(t, os.Remove(partVideo))
+	executor := NewExecutor(logrus.StandardLogger())
+	kept := executor.cleanupOrphanedAssFiles(
+		[]FileInfo{{Path: partVideo, Type: FileTypeVideo}},
+		[]FileInfo{{Path: rootXML, Type: FileTypeOther}},
+	)
+
+	assert.NoFileExists(t, rootXML, "PART 视频删除后不应保留根 XML 侧车")
+	assert.Empty(t, kept, "孤立根侧车不应继续出现在 Pipeline 输出")
+}
+
 // TestExecute_UploadCancelledDuringUpload_FilePreserved
 // 测试：上传阶段被取消（context 取消），上传返回 error，文件应保留且有日志
 func TestExecute_UploadCancelledDuringUpload_FilePreserved(t *testing.T) {

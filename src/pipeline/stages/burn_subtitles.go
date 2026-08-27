@@ -57,6 +57,20 @@ func (s *BurnSubtitlesStage) Execute(ctx *pipeline.PipelineContext, input []pipe
 		return input, nil
 	}
 
+	// XML-only 或尚未生成 ASS 的任务不需要启动/等待 FFmpeg，直接透传视频和侧车。
+	// 这保证全局开启烧录时，房间选择仅 XML 仍能正常完成 Pipeline。
+	hasAssInput := false
+	for _, file := range input {
+		if file.Type == pipeline.FileTypeVideo && !file.Deletable && s.findAssFile(file.Path) != "" {
+			hasAssInput = true
+			break
+		}
+	}
+	if !hasAssInput {
+		s.logs = "未找到 ASS 字幕，跳过烧录"
+		return input, nil
+	}
+
 	ffmpegPath := ctx.FFmpegPath
 	if ffmpegPath == "" {
 		// FFmpeg 可能仍在后台异步下载（首次启动场景），等待其就绪后再查找，

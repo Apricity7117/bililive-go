@@ -12,6 +12,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/pipeline"
 	"github.com/bililive-go/bililive-go/src/pkg/metadata"
 	"github.com/bililive-go/bililive-go/src/pkg/openlist"
+	"github.com/bililive-go/bililive-go/src/pkg/sidecar"
 	"github.com/bililive-go/bililive-go/src/tools"
 )
 
@@ -100,11 +101,11 @@ type CloudUploadStage struct {
 	config          pipeline.StageConfig
 	storageName     string
 	pathTemplate    string
-	deleteAfter     bool   // 仅删除已上传的文件
-	deleteAllAfter  bool   // 删除全部文件（含中间产物）
-	uploadTiming    string // immediate 或 after_process
+	deleteAfter     bool     // 仅删除已上传的文件
+	deleteAllAfter  bool     // 删除全部文件（含中间产物）
+	uploadTiming    string   // immediate 或 after_process
 	fileTypes       []string // 过滤的文件类型，空表示所有
-	uploadSubtitles bool   // 是否上传关联的 .ass 弹幕字幕文件
+	uploadSubtitles bool     // 是否上传关联的 ASS/XML 弹幕文件
 	commands        []string
 	logs            string
 }
@@ -181,31 +182,33 @@ func (s *CloudUploadStage) Execute(ctx *pipeline.PipelineContext, input []pipeli
 	// 与最终视频（如录播姬生成的多分段 _PART 文件），无需额外限制
 	uploadedIndices := map[int]bool{} // 记录实际上传的文件在 output 中的索引
 
-	// 上传弹幕字幕：扫描 input 中的视频文件，从磁盘发现关联的 .ass 文件并加入 input
+	// 上传弹幕文件：扫描 input 中的视频文件，从磁盘发现关联的 ASS/XML 文件并加入 input。
 	if s.uploadSubtitles {
-		assAdded := map[string]bool{}
+		danmakuAdded := map[string]bool{}
 		var discovered []pipeline.FileInfo
 		for _, f := range input {
-			ext := strings.ToLower(filepath.Ext(f.Path))
-			if ext != ".flv" && ext != ".mp4" && ext != ".mkv" && ext != ".ts" {
+			if !sidecar.IsVideo(f.Path) {
 				continue
 			}
-			assPath := strings.TrimSuffix(f.Path, ext) + ".ass"
-			if assAdded[assPath] {
-				continue
-			}
-			if info, err := os.Stat(assPath); err == nil && info.Size() > 0 {
+			for _, danmakuPath := range sidecar.SidecarPaths(f.Path) {
+				if danmakuAdded[danmakuPath] {
+					continue
+				}
+				info, err := os.Stat(danmakuPath)
+				if err != nil || info.Size() == 0 {
+					continue
+				}
 				// 检查 input 和 discovered 中是否已存在
 				alreadyExists := false
 				for _, of := range input {
-					if of.Path == assPath {
+					if of.Path == danmakuPath {
 						alreadyExists = true
 						break
 					}
 				}
 				if !alreadyExists {
 					for _, of := range discovered {
-						if of.Path == assPath {
+						if of.Path == danmakuPath {
 							alreadyExists = true
 							break
 						}
@@ -213,12 +216,12 @@ func (s *CloudUploadStage) Execute(ctx *pipeline.PipelineContext, input []pipeli
 				}
 				if !alreadyExists {
 					discovered = append(discovered, pipeline.FileInfo{
-						Path: assPath,
+						Path: danmakuPath,
 						Size: info.Size(),
 						Type: pipeline.FileTypeOther,
 					})
-					assAdded[assPath] = true
-					ctx.Logger.Infof("发现关联弹幕字幕文件: %s", assPath)
+					danmakuAdded[danmakuPath] = true
+					ctx.Logger.Infof("发现关联弹幕文件: %s", danmakuPath)
 				}
 			}
 		}
@@ -229,17 +232,17 @@ func (s *CloudUploadStage) Execute(ctx *pipeline.PipelineContext, input []pipeli
 
 	for _, file := range input {
 		// 跳过标记为待删除的中间文件（由其他阶段产出，不应上传）
-		// 例外：uploadSubtitles 时放行 Deletable 的 .ass（如 burn_delete_ass 标记的字幕）
+		// 例外：uploadSubtitles 时放行 Deletable 的 ASS/XML（如烧录或清理阶段标记的侧车）
 		if file.Deletable {
-			if !s.uploadSubtitles || strings.ToLower(filepath.Ext(file.Path)) != ".ass" {
+			if !s.uploadSubtitles || !sidecar.IsDanmaku(file.Path) {
 				output = append(output, file)
 				continue
 			}
 		}
 
-		// 文件类型过滤（uploadSubtitles 时放行 .ass 字幕文件）
+		// 文件类型过滤（uploadSubtitles 时放行 ASS/XML 弹幕文件）
 		if len(s.fileTypes) > 0 && !s.matchFileType(file.Type) {
-			if !s.uploadSubtitles || strings.ToLower(filepath.Ext(file.Path)) != ".ass" {
+			if !s.uploadSubtitles || !sidecar.IsDanmaku(file.Path) {
 				output = append(output, file)
 				continue
 			}
@@ -362,37 +365,38 @@ func (s *CloudUploadStage) Execute(ctx *pipeline.PipelineContext, input []pipeli
 	// 改用 Metadata["uploaded"] 标记，由 Executor 在清理时读取
 	if !uploadFailed && s.uploadTiming != "immediate" {
 		if s.deleteAllAfter {
-			// 删除全部模式：查找视频文件关联的 .ass 字幕文件并加入 output
-			// （BurnSubtitlesStage 仅在 burn_delete_ass=true 时才将 .ass 加入 output，
+			// 删除全部模式：查找视频文件关联的 ASS/XML 弹幕文件并加入 output
+			// （BurnSubtitlesStage 仅在 burn_delete_ass=true 时才将 ASS 加入 output，
 			//   但 delete_all 意图是删除所有文件，应包含字幕）
-			assAdded := map[string]bool{}
+			danmakuAdded := map[string]bool{}
 			for _, f := range output {
-				ext := strings.ToLower(filepath.Ext(f.Path))
-				if ext != ".flv" && ext != ".mp4" && ext != ".mkv" && ext != ".ts" {
+				if !sidecar.IsVideo(f.Path) {
 					continue
 				}
-				assPath := strings.TrimSuffix(f.Path, ext) + ".ass"
-				if assAdded[assPath] {
-					continue
-				}
-				if _, err := os.Stat(assPath); err == nil {
-					// 检查 output 中是否已存在
+				for _, danmakuPath := range sidecar.SidecarPaths(f.Path) {
+					if danmakuAdded[danmakuPath] {
+						continue
+					}
+					if _, err := os.Stat(danmakuPath); err != nil {
+						continue
+					}
 					alreadyInOutput := false
 					for _, of := range output {
-						if of.Path == assPath {
+						if of.Path == danmakuPath {
 							alreadyInOutput = true
 							break
 						}
 					}
-					if !alreadyInOutput {
-						output = append(output, pipeline.FileInfo{
-							Path:      assPath,
-							Type:      pipeline.FileTypeOther,
-							Deletable: true, // 标记为可删除，由 executor 统一清理
-						})
-						assAdded[assPath] = true
-						ctx.Logger.Infof("delete_all 模式：关联字幕文件 %s", assPath)
+					if alreadyInOutput {
+						continue
 					}
+					output = append(output, pipeline.FileInfo{
+						Path:      danmakuPath,
+						Type:      pipeline.FileTypeOther,
+						Deletable: true,
+					})
+					danmakuAdded[danmakuPath] = true
+					ctx.Logger.Infof("delete_all 模式：关联弹幕文件 %s", danmakuPath)
 				}
 			}
 
@@ -430,31 +434,32 @@ func (s *CloudUploadStage) Execute(ctx *pipeline.PipelineContext, input []pipeli
 			}
 			// 已上传的视频文件会被删除，其关联的 .ass 字幕文件也应标记为可删除
 			// 避免摘要将已删除的字幕文件误显为本地保留文件
-			// 注意：这些 .ass 未被上传到云存储，不标记 uploaded，仅标记 Deletable
+			// 注意：这些侧车未被上传到云存储，不标记 uploaded，仅标记 Deletable
 			for i, f := range output {
 				if !uploadedIndices[i] {
 					continue // 仅处理已上传成功的视频文件
 				}
-				ext := strings.ToLower(filepath.Ext(f.Path))
-				if ext != ".flv" && ext != ".mp4" && ext != ".mkv" && ext != ".ts" {
+				if !sidecar.IsVideo(f.Path) {
 					continue
 				}
-				assPath := strings.TrimSuffix(f.Path, ext) + ".ass"
-				if _, err := os.Stat(assPath); err == nil {
+				for _, danmakuPath := range sidecar.SidecarPaths(f.Path) {
+					if _, err := os.Stat(danmakuPath); err != nil {
+						continue
+					}
 					alreadyInOutput := false
 					for _, of := range output {
-						if of.Path == assPath {
+						if of.Path == danmakuPath {
 							alreadyInOutput = true
 							break
 						}
 					}
 					if !alreadyInOutput {
 						output = append(output, pipeline.FileInfo{
-							Path:      assPath,
+							Path:      danmakuPath,
 							Type:      pipeline.FileTypeOther,
-							Deletable: true, // 标记为可删除，由 executor 统一清理
+							Deletable: true,
 						})
-						ctx.Logger.Infof("delete_uploaded 模式：关联字幕文件 %s", assPath)
+						ctx.Logger.Infof("delete_uploaded 模式：关联弹幕文件 %s", danmakuPath)
 					}
 				}
 			}

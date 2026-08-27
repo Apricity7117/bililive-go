@@ -45,17 +45,19 @@ func getCompiledSignJS() (*goja.Program, error) {
 
 // DouyinClient 抖音弹幕 WebSocket 客户端
 type DouyinClient struct {
-	roomID    string
-	cookies   string
-	conn      *websocket.Conn
-	onDanmaku func(username, content string)
-	onGift    func(username, giftName string, num int)
-	done      chan struct{}
-	closeOnce sync.Once
-	logger    *logrus.Entry
-	mu        sync.Mutex
-	running   bool
-	seqId     uint64
+	roomID         string
+	cookies        string
+	conn           *websocket.Conn
+	onDanmaku      func(username, content string)
+	onGift         func(username, giftName string, num int)
+	onDanmakuEvent func(ChatMessage)
+	onGiftEvent    func(GiftMessage)
+	done           chan struct{}
+	closeOnce      sync.Once
+	logger         *logrus.Entry
+	mu             sync.Mutex
+	running        bool
+	seqId          uint64
 }
 
 // NewDouyinClient 创建新的抖音弹幕客户端
@@ -69,6 +71,12 @@ func NewDouyinClient(roomID, cookies string, onDanmaku func(username, content st
 		logger:    logger,
 	}
 }
+
+// OnDanmakuEvent 注册保留平台原始字段的弹幕回调。
+func (c *DouyinClient) OnDanmakuEvent(fn func(ChatMessage)) { c.onDanmakuEvent = fn }
+
+// OnGiftEvent 注册保留平台原始字段的礼物回调。
+func (c *DouyinClient) OnGiftEvent(fn func(GiftMessage)) { c.onGiftEvent = fn }
 
 // Start 启动 WebSocket 连接和消息循环
 func (c *DouyinClient) Start(ctx context.Context) error {
@@ -363,7 +371,12 @@ func (c *DouyinClient) handleChatMessage(payload []byte) {
 		username = "未知用户"
 	}
 
-	if content != "" && c.onDanmaku != nil {
+	if content == "" {
+		return
+	}
+	if c.onDanmakuEvent != nil {
+		c.onDanmakuEvent(*chatMsg)
+	} else if c.onDanmaku != nil {
 		c.onDanmaku(username, content)
 	}
 }
@@ -375,7 +388,7 @@ func (c *DouyinClient) handleGiftMessage(payload []byte) {
 		return
 	}
 
-	if c.onGift == nil {
+	if c.onGift == nil && c.onGiftEvent == nil {
 		return
 	}
 
@@ -400,7 +413,11 @@ func (c *DouyinClient) handleGiftMessage(payload []byte) {
 		num = 1
 	}
 
-	c.onGift(username, giftName, num)
+	if c.onGiftEvent != nil {
+		c.onGiftEvent(*giftMsg)
+	} else {
+		c.onGift(username, giftName, num)
+	}
 }
 
 // heartbeatLoop 心跳循环（每 5 秒发送一次）

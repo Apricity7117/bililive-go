@@ -37,6 +37,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/pkg/memstats"
 	"github.com/bililive-go/bililive-go/src/pkg/metadata"
 	"github.com/bililive-go/bililive-go/src/pkg/ratelimit"
+	"github.com/bililive-go/bililive-go/src/pkg/sidecar"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
 	"github.com/bililive-go/bililive-go/src/recorders"
 	"github.com/bililive-go/bililive-go/src/tools"
@@ -1523,6 +1524,29 @@ func updateConfig(writer http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// parseDanmakuFormats 解析 API 中的格式数组，并保留显式空数组以便后续校验。
+func parseDanmakuFormats(value interface{}) ([]configs.DanmakuFormat, bool) {
+	if value == nil {
+		return nil, false
+	}
+	result := make([]configs.DanmakuFormat, 0)
+	switch values := value.(type) {
+	case []interface{}:
+		for _, item := range values {
+			if text, ok := item.(string); ok {
+				result = append(result, configs.DanmakuFormat(strings.ToLower(strings.TrimSpace(text))))
+			}
+		}
+	case []string:
+		for _, text := range values {
+			result = append(result, configs.DanmakuFormat(strings.ToLower(strings.TrimSpace(text))))
+		}
+	default:
+		return nil, false
+	}
+	return result, true
+}
+
 // applyConfigUpdates 将更新应用到配置
 func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error {
 	// 处理 RPC 配置
@@ -1567,6 +1591,15 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 		c.DanmakuEnable = danmakuEnable
 	}
 	if danmaku, ok := updates["danmaku"].(map[string]interface{}); ok {
+		if formats, present := parseDanmakuFormats(danmaku["formats"]); present {
+			c.Danmaku.Formats = formats
+		}
+		if useServerTimestamp, present := danmaku["use_server_timestamp"].(bool); present {
+			c.Danmaku.UseServerTimestamp = configs.BoolPtr(useServerTimestamp)
+		}
+		if useCookie, present := danmaku["use_cookie"].(bool); present {
+			c.Danmaku.UseCookie = configs.BoolPtr(useCookie)
+		}
 		if fontSize, ok := danmaku["font_size"].(float64); ok {
 			c.Danmaku.FontSize = int(fontSize)
 		}
@@ -1939,7 +1972,8 @@ func updatePlatformConfig(writer http.ResponseWriter, r *http.Request) {
 
 		// 验证弹幕配置有效性
 		if pc.Danmaku != nil {
-			if err := pc.Danmaku.ValidateWithPlatform(platformKey); err != nil {
+			candidate := *pc.Danmaku
+			if err := candidate.ValidateWithPlatform(platformKey); err != nil {
 				return fmt.Errorf("弹幕参数无效: %w", err)
 			}
 		}
@@ -2070,7 +2104,8 @@ func updateRoomConfigById(writer http.ResponseWriter, r *http.Request) {
 		// 验证弹幕配置有效性（同时根据平台清理不适用的字段）
 		if room.Danmaku != nil {
 			platformKey := configs.GetPlatformKeyFromUrl(room.Url)
-			if err := room.Danmaku.ValidateWithPlatform(platformKey); err != nil {
+			candidate := *room.Danmaku
+			if err := candidate.ValidateWithPlatform(platformKey); err != nil {
 				return fmt.Errorf("弹幕参数无效: %w", err)
 			}
 		}
@@ -2227,9 +2262,17 @@ func applyOverridableConfigUpdates(oc *configs.OverridableConfig, updates map[st
 	// 处理 danmaku 弹幕参数配置
 	if danmaku, ok := updates["danmaku"].(map[string]interface{}); ok {
 		if oc.Danmaku == nil {
-			// 从全局默认值初始化，避免未设置的字段被覆盖为零值
-			defaultCfg := configs.GetDefaultDanmakuConfig()
-			oc.Danmaku = &defaultCfg
+			// 使用空覆盖对象保留三级继承；缺失字段由最终解析配置提供默认值。
+			oc.Danmaku = &configs.DanmakuConfig{}
+		}
+		if formats, present := parseDanmakuFormats(danmaku["formats"]); present {
+			oc.Danmaku.Formats = formats
+		}
+		if useServerTimestamp, present := danmaku["use_server_timestamp"].(bool); present {
+			oc.Danmaku.UseServerTimestamp = configs.BoolPtr(useServerTimestamp)
+		}
+		if useCookie, present := danmaku["use_cookie"].(bool); present {
+			oc.Danmaku.UseCookie = configs.BoolPtr(useCookie)
 		}
 		if fontSize, ok := danmaku["font_size"].(float64); ok {
 			oc.Danmaku.FontSize = int(fontSize)
@@ -2348,7 +2391,8 @@ func updateRoomConfig(writer http.ResponseWriter, r *http.Request) {
 		// 验证弹幕配置（同时根据平台清理不适用的字段）
 		if room.Danmaku != nil {
 			platformKey := configs.GetPlatformKeyFromUrl(decodedUrl)
-			if err := room.Danmaku.ValidateWithPlatform(platformKey); err != nil {
+			candidate := *room.Danmaku
+			if err := candidate.ValidateWithPlatform(platformKey); err != nil {
 				return fmt.Errorf("弹幕配置无效: %w", err)
 			}
 		}
@@ -2418,16 +2462,17 @@ func getFileInfo(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	type jsonFile struct {
-		IsFolder     bool   `json:"is_folder"`
-		Name         string `json:"name"`
-		LastModified int64  `json:"last_modified"`
-		Size         int64  `json:"size"`
-		SubtitleFile string `json:"subtitle_file,omitempty"`
-		Uploaded     bool   `json:"uploaded,omitempty"`
+		IsFolder     bool     `json:"is_folder"`
+		Name         string   `json:"name"`
+		LastModified int64    `json:"last_modified"`
+		Size         int64    `json:"size"`
+		SubtitleFile string   `json:"subtitle_file,omitempty"`
+		DanmakuFiles []string `json:"danmaku_files,omitempty"`
+		Uploaded     bool     `json:"uploaded,omitempty"`
 	}
 
-	// First pass: separate ASS files and build base-name -> ASS file map
-	assFiles := make(map[string]string) // baseName (no ext) -> ass filename
+	// First pass: separate ASS/XML files and build base-name -> sidecars map.
+	danmakuFiles := make(map[string][]string)
 	type fileEntry struct {
 		dir  os.DirEntry
 		info os.FileInfo
@@ -2439,10 +2484,9 @@ func getFileInfo(writer http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		name := file.Name()
-		if !file.IsDir() && strings.HasSuffix(strings.ToLower(name), ".ass") {
-			// Register ASS file by base name (without extension)
-			baseName := name[:len(name)-4]
-			assFiles[baseName] = name
+		if !file.IsDir() && (strings.HasSuffix(strings.ToLower(name), ".ass") || strings.HasSuffix(strings.ToLower(name), ".xml")) {
+			baseName := strings.TrimSuffix(name, filepath.Ext(name))
+			danmakuFiles[baseName] = append(danmakuFiles[baseName], name)
 		} else {
 			validFiles = append(validFiles, fileEntry{dir: file, info: info})
 		}
@@ -2458,13 +2502,25 @@ func getFileInfo(writer http.ResponseWriter, r *http.Request) {
 		}
 		if !fe.dir.IsDir() {
 			jf.Size = fe.info.Size()
-			// Check if this file has an associated ASS subtitle
+			// 关联弹幕文件：ASS 继续填充旧字段，ASS/XML 全量填充新数组。
 			baseName := fe.dir.Name()
 			if idx := strings.LastIndex(baseName, "."); idx > 0 {
 				baseName = baseName[:idx]
 			}
-			if assName, ok := assFiles[baseName]; ok {
-				jf.SubtitleFile = assName
+			associatedBases := []string{baseName}
+			if idx := strings.LastIndex(baseName, "_PART"); idx > 0 {
+				rootBase := baseName[:idx]
+				if sidecar.IsPartBase(baseName, rootBase) {
+					associatedBases = append(associatedBases, rootBase)
+				}
+			}
+			for _, associatedBase := range associatedBases {
+				for _, danmakuFile := range danmakuFiles[associatedBase] {
+					jf.DanmakuFiles = append(jf.DanmakuFiles, danmakuFile)
+					if strings.EqualFold(filepath.Ext(danmakuFile), ".ass") {
+						jf.SubtitleFile = danmakuFile
+					}
+				}
 			}
 			// Check if this file has been uploaded to cloud
 			relPath := fe.dir.Name()
@@ -2487,6 +2543,27 @@ func getFileInfo(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(writer, json)
+}
+
+// syncDanmakuSidecars 同步重命名视频关联的 ASS/XML 弹幕文件。
+func syncDanmakuSidecars(oldBase, newBase string) {
+	for _, ext := range []string{".ass", ".xml"} {
+		oldPath := oldBase + ext
+		if _, err := os.Stat(oldPath); err == nil {
+			_ = os.Rename(oldPath, newBase+ext)
+		}
+	}
+}
+
+func isVideoFilePath(filePath string) bool {
+	return sidecar.IsVideo(filePath)
+}
+
+// removeDanmakuSidecars 删除视频关联的 ASS/XML 弹幕文件，PART 视频同时处理根侧车。
+func removeDanmakuSidecars(videoPath string) {
+	for _, path := range sidecar.SidecarPaths(videoPath) {
+		_ = os.Remove(path)
+	}
 }
 
 // translateOSError 将系统错误转换为中文，兼容多平台。
@@ -2582,15 +2659,11 @@ func renameFile(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 同步重命名关联的 ASS 弹幕文件
-	if !info.IsDir() {
+	// 同步重命名关联的 ASS/XML 弹幕文件
+	if !info.IsDir() && isVideoFilePath(oldAbsPath) {
 		oldBase := strings.TrimSuffix(oldAbsPath, filepath.Ext(oldAbsPath))
 		newBase := strings.TrimSuffix(newAbsPath, filepath.Ext(newAbsPath))
-		oldAss := oldBase + ".ass"
-		newAss := newBase + ".ass"
-		if _, err := os.Stat(oldAss); err == nil {
-			os.Rename(oldAss, newAss)
-		}
+		syncDanmakuSidecars(oldBase, newBase)
 	}
 
 	// 迁移上传标记（key 统一用正斜杠）
@@ -2642,12 +2715,9 @@ func deleteFile(writer http.ResponseWriter, r *http.Request) {
 		isDir = info.IsDir()
 	}
 
-	// 删除关联的 ASS 弹幕文件
-	if !isDir {
-		assPath := strings.TrimSuffix(absPath, filepath.Ext(absPath)) + ".ass"
-		if _, err := os.Stat(assPath); err == nil {
-			os.Remove(assPath)
-		}
+	// 删除关联的 ASS/XML 弹幕文件
+	if !isDir && isVideoFilePath(absPath) {
+		removeDanmakuSidecars(absPath)
 	}
 
 	if err := os.RemoveAll(absPath); err != nil {
@@ -2745,15 +2815,11 @@ func batchRenameFiles(writer http.ResponseWriter, r *http.Request) {
 			results = append(results, Result{Path: path, Success: false, Message: translateOSError(err)})
 		} else {
 			results = append(results, Result{Path: path, Success: true, Message: "成功"})
-			// 同步重命名关联的 ASS 弹幕文件
-			if !info.IsDir() {
+			// 同步重命名关联的 ASS/XML 弹幕文件
+			if !info.IsDir() && isVideoFilePath(oldAbsPath) {
 				oldBase := strings.TrimSuffix(oldAbsPath, filepath.Ext(oldAbsPath))
 				newBase := strings.TrimSuffix(newAbsPath, filepath.Ext(newAbsPath))
-				oldAss := oldBase + ".ass"
-				newAss := newBase + ".ass"
-				if _, err := os.Stat(oldAss); err == nil {
-					os.Rename(oldAss, newAss)
-				}
+				syncDanmakuSidecars(oldBase, newBase)
 			}
 
 			// 迁移上传标记（key 统一用正斜杠）
@@ -2819,12 +2885,9 @@ func batchDeleteFiles(writer http.ResponseWriter, r *http.Request) {
 			isDir = info.IsDir()
 		}
 
-		// 删除关联的 ASS 弹幕文件
-		if !isDir {
-			assPath := strings.TrimSuffix(absPath, filepath.Ext(absPath)) + ".ass"
-			if _, err := os.Stat(assPath); err == nil {
-				os.Remove(assPath)
-			}
+		// 删除关联的 ASS/XML 弹幕文件
+		if !isDir && isVideoFilePath(absPath) {
+			removeDanmakuSidecars(absPath)
 		}
 
 		if err := os.RemoveAll(absPath); err != nil {

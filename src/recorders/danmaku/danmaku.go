@@ -3,6 +3,7 @@ package danmaku
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -21,6 +22,7 @@ type DanmakuRecorder struct {
 
 // NewDanmakuRecorder 创建哔哩哔哩弹幕录制器
 func NewDanmakuRecorder(roomID int, cookies string, outputFile string, cfg configs.DanmakuConfig, logger *logrus.Entry) *DanmakuRecorder {
+	cfg.SetDefaultsWithPlatform("bilibili")
 	return &DanmakuRecorder{
 		baseRecorder: baseRecorder{
 			outputFile: outputFile,
@@ -43,41 +45,58 @@ func (d *DanmakuRecorder) Start(ctx context.Context) error {
 
 	d.startAt = time.Now()
 
-	assWriter, err := NewAssWriter(d.outputFile, d.startAt, d.cfg, "Bilibili Danmaku")
-	if err != nil {
-		return fmt.Errorf("failed to create ass writer: %w", err)
+	if err := d.initWriters(d.startAt, "哔哩哔哩", strconv.Itoa(d.roomID), "Bilibili Danmaku"); err != nil {
+		return fmt.Errorf("failed to create danmaku writers: %w", err)
 	}
-	d.assWriter = assWriter
 
-	c := bilibili.NewClient(d.roomID, d.cookies, d.logger)
+	cookies := d.cookies
+	if !d.cfg.CookieEnabled() {
+		cookies = ""
+	}
+	c := bilibili.NewClient(d.roomID, cookies, d.logger)
 
 	c.OnDanmaku(func(msg bilibili.DanmakuMsg) {
-		d.addDanmaku(time.Now(), msg.Uname, msg.Content, msg.Color)
+		recvAt := time.Now()
+		d.addEvent(Event{Type: EventComment, ReceivedAt: recvAt, EventTimestamp: msg.Timestamp, Text: msg.Content, Color: msg.Color, Mode: msg.Mode, UID: strconv.FormatInt(msg.UID, 10), Username: msg.Uname}, "danmaku", map[string]interface{}{
+			"color": msg.Color, "timestamp": recvAt.Unix(), "uid": msg.UID,
+		})
 	})
 
 	if d.cfg.RecordGift != nil && *d.cfg.RecordGift {
 		c.OnGift(func(msg bilibili.GiftMsg) {
 			if msg.Num > 0 {
-				d.addGift(time.Now(), msg.Uname, msg.GiftName, msg.Num, msg.Price, msg.CoinType)
+				recvAt := time.Now()
+				priceMilli := int64(0)
+				if msg.CoinType == "gold" {
+					priceMilli = int64(msg.Price)
+				}
+				d.addEvent(Event{Type: EventGift, ReceivedAt: recvAt, EventTimestamp: msg.Timestamp, Name: msg.GiftName, Count: int64(msg.Num), PriceMilli: priceMilli, CoinType: msg.CoinType, UID: strconv.FormatInt(msg.UID, 10), Username: msg.Uname}, "gift", map[string]interface{}{
+					"gift_name": msg.GiftName, "num": msg.Num, "price": msg.Price, "coin_type": msg.CoinType, "timestamp": recvAt.Unix(), "uid": msg.UID,
+				})
 			}
 		})
 	}
 
 	if d.cfg.RecordGuard != nil && *d.cfg.RecordGuard {
 		c.OnGuardBuy(func(msg bilibili.GuardBuyMsg) {
-			d.addGuard(time.Now(), msg.Username, msg.GiftName, msg.Price)
+			recvAt := time.Now()
+			d.addEvent(Event{Type: EventGuard, ReceivedAt: recvAt, EventTimestamp: msg.Timestamp, Name: msg.GiftName, Count: int64(msg.Num), PriceMilli: int64(msg.Price), Level: msg.GuardLevel, UID: strconv.FormatInt(msg.UID, 10), Username: msg.Username}, "guard", map[string]interface{}{
+				"gift_name": msg.GiftName, "price": msg.Price, "timestamp": recvAt.Unix(), "uid": msg.UID,
+			})
 		})
 	}
 
 	if d.cfg.RecordSuperChat != nil && *d.cfg.RecordSuperChat {
 		c.OnSuperChat(func(msg bilibili.SuperChatMsg) {
-			d.addSuperChat(time.Now(), msg.Uname, msg.Message, msg.Price)
+			recvAt := time.Now()
+			d.addEvent(Event{Type: EventSuperChat, ReceivedAt: recvAt, EventTimestamp: msg.Timestamp, Text: msg.Message, PriceMilli: int64(msg.Price) * 1000, Duration: msg.Duration, UID: strconv.FormatInt(msg.UID, 10), Username: msg.Uname}, "super_chat", map[string]interface{}{
+				"price": msg.Price, "timestamp": recvAt.Unix(), "uid": msg.UID,
+			})
 		})
 	}
 
 	if err := c.Start(); err != nil {
-		assWriter.Close()
-		d.assWriter = nil
+		d.discardWritersLocked()
 		return fmt.Errorf("failed to start bilibili danmaku client: %w", err)
 	}
 
@@ -95,28 +114,22 @@ func (d *DanmakuRecorder) Start(ctx context.Context) error {
 
 // Stop 停止弹幕录制
 func (d *DanmakuRecorder) Stop() {
-	d.mu.Lock()
-	if !d.running {
-		d.mu.Unlock()
+	w := d.stopBase()
+	if w == nil {
 		return
 	}
-	d.running = false
-	w := d.assWriter
-	d.assWriter = nil
 	c := d.client
 	d.client = nil
-	d.mu.Unlock()
 
 	if c != nil {
 		c.Stop()
 	}
-	if w != nil {
-		w.Close()
-	}
+	d.closeWriters(w)
 	count := d.GetCount()
+	files := d.OutputFiles()
 	if count > 0 {
-		d.logger.Infof("弹幕录制已停止，共录制 %d 条弹幕 -> %s", count, d.outputFile)
+		d.logger.Infof("弹幕录制已停止，共录制 %d 条弹幕，输出文件: %v", count, files)
 	} else {
-		d.logger.Info("弹幕录制已停止，未收到弹幕")
+		d.logger.Infof("弹幕录制已停止，未收到弹幕，输出文件: %v", files)
 	}
 }

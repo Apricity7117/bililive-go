@@ -7,6 +7,7 @@ type DanmakuMsg struct {
 	Uname       string
 	GuardLevel  int // 0=无, 1=总督, 2=提督, 3=舰长
 	Color       int
+	Mode        int
 	Timestamp   int64
 	MedalLevel  int
 	MedalName   string
@@ -27,10 +28,12 @@ type GiftMsg struct {
 
 // SuperChatMsg 醒目留言（SC）
 type SuperChatMsg struct {
-	UID     int64
-	Uname   string
-	Message string
-	Price   int
+	UID       int64
+	Uname     string
+	Message   string
+	Price     int
+	Duration  int
+	Timestamp int64
 }
 
 // GuardBuyMsg 舰长购买
@@ -41,6 +44,7 @@ type GuardBuyMsg struct {
 	GuardLevel int // 1=总督, 2=提督, 3=舰长
 	Num        int
 	Price      int
+	Timestamp  int64
 }
 
 // HostInfo 弹幕服务器信息
@@ -72,7 +76,7 @@ type RoomInitResponse struct {
 type NavResponse struct {
 	Code int `json:"code"`
 	Data struct {
-		Mid int `json:"mid"`
+		Mid    int `json:"mid"`
 		WbiImg struct {
 			ImgURL string `json:"img_url"`
 			SubURL string `json:"sub_url"`

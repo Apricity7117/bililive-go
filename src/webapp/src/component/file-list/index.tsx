@@ -481,6 +481,7 @@ type CurrentFolderFile = {
     last_modified: number;
     size: number;
     subtitle_file?: string;
+    danmaku_files?: string[];
     uploaded?: boolean;
 }
 
@@ -1209,14 +1210,14 @@ const FileList: React.FC = () => {
                     <div className="file-name-cell">
                         {record.is_folder ? <FolderOutlined style={{ color: '#1890ff', fontSize: '16px' }} /> : <FileOutlined style={{ fontSize: '16px' }} />}
                         <span className="name-text">{record.name}</span>
-                        {record.subtitle_file && (
-                            <Tooltip title={`弹幕字幕: ${record.subtitle_file}`}>
+                        {record.danmaku_files && record.danmaku_files.length > 0 && (
+                            <Tooltip title={`弹幕文件: ${record.danmaku_files.join('、')}`}>
                                 <span style={{ marginLeft: 6, fontSize: 11, color: '#1890ff', background: '#e6f4ff', padding: '1px 6px', borderRadius: 4, cursor: 'default' }}>
                                     弹幕
                                 </span>
                             </Tooltip>
                         )}
-                        {!record.is_folder && !record.subtitle_file && isVideoFileName(record.name) && (
+                        {!record.is_folder && (!record.danmaku_files || record.danmaku_files.length === 0) && isVideoFileName(record.name) && (
                             <span style={{ marginLeft: 6, fontSize: 11, color: '#8c8c8c', background: '#f5f5f5', padding: '1px 6px', borderRadius: 4, cursor: 'default' }}>
                                 无字幕
                             </span>

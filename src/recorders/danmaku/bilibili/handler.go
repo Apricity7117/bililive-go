@@ -68,6 +68,7 @@ func parseDanmaku(data []byte) (DanmakuMsg, bool) {
 
 	msg.GuardLevel = int(info.Get("7").Int())
 	msg.Timestamp = info.Get("0.4").Int()
+	msg.Mode = int(info.Get("0.1").Int())
 
 	// 勋章信息
 	msg.MedalLevel = int(info.Get("3.0").Int())
@@ -135,10 +136,16 @@ func parseSuperChat(data []byte) (SuperChatMsg, bool) {
 	}
 
 	msg := SuperChatMsg{
-		UID:     scData.Get("uid").Int(),
-		Uname:   scData.Get("user_info.uname").String(),
-		Message: scData.Get("message").String(),
-		Price:   int(scData.Get("price").Int()),
+		UID:       scData.Get("uid").Int(),
+		Uname:     scData.Get("user_info.uname").String(),
+		Message:   scData.Get("message").String(),
+		Price:     int(scData.Get("price").Int()),
+		Duration:  int(scData.Get("time").Int()),
+		Timestamp: scData.Get("send_time").Int(),
+	}
+	if msg.Timestamp <= 0 {
+		// 部分历史消息没有 send_time，保留平台提供的 display_time 作为降级值。
+		msg.Timestamp = scData.Get("ts").Int()
 	}
 
 	if msg.Message == "" {
@@ -155,13 +162,22 @@ func parseGuardBuy(data []byte) (GuardBuyMsg, bool) {
 		return GuardBuyMsg{}, false
 	}
 
+	timestamp := guardData.Get("timestamp").Int()
+	if timestamp <= 0 {
+		timestamp = guardData.Get("start_time").Int()
+	}
+	username := guardData.Get("username").String()
+	if username == "" {
+		username = guardData.Get("user_info.uname").String()
+	}
 	msg := GuardBuyMsg{
 		UID:        guardData.Get("uid").Int(),
-		Username:   guardData.Get("username").String(),
+		Username:   username,
 		GiftName:   guardData.Get("gift_name").String(),
 		GuardLevel: int(guardData.Get("guard_level").Int()),
 		Num:        int(guardData.Get("num").Int()),
 		Price:      int(guardData.Get("price").Int()),
+		Timestamp:  timestamp,
 	}
 
 	if msg.GiftName == "" {

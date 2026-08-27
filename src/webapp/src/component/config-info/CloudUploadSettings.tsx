@@ -123,7 +123,18 @@ const analyzeConfig = (config: any) => {
   const upload = cu.enable ?? false;
   const delAfter = cu.delete_after_upload ?? false;
   const delAllAfter = cu.delete_all_after_upload ?? false;
-  const uploadAss = cu.upload_subtitles ?? false;
+  const uploadDanmaku = cu.upload_subtitles ?? false;
+
+  // formats 缺失时沿用后端默认的 ASS；显式空数组/未知格式保持为空，
+  // 让预览反映当前配置而不是凭空展示不会生成的侧车文件。
+  const configuredFormats = config.danmaku?.formats;
+  const formats: string[] = Array.isArray(configuredFormats)
+    ? Array.from(new Set(configuredFormats
+      .map((format: unknown) => String(format).trim().toLowerCase())
+      .filter((format: string) => format === 'ass' || format === 'xml')))
+    : ['ass'];
+  const hasAss = formats.includes('ass');
+  const hasXml = formats.includes('xml');
 
   // 文件状态：uploaded(上传保留), uploaded_deleted(上传后删除), intermediate(中间产物,不上传),
   // deleted(删除), kept(本地保留)
@@ -131,13 +142,19 @@ const analyzeConfig = (config: any) => {
 
   // 初始文件
   files['video.flv'] = { ext: '.flv', desc: '原始录制视频', status: 'kept' };
-  files['video.ass'] = { ext: '.ass', desc: '弹幕字幕', status: 'kept' };
+  if (hasAss) {
+    files['video.ass'] = { ext: '.ass', desc: 'ASS 弹幕字幕', status: 'kept' };
+  }
+  if (hasXml) {
+    files['video.xml'] = { ext: '.xml', desc: 'XML 弹幕文件', status: 'kept' };
+  }
 
   // immediate 模式：先上传原始文件（.ass 在录制结束时已存在，可一并上传）
   if (isImmediate && upload) {
     files['video.flv'].status = 'uploaded';
-    if (uploadAss) {
-      files['video.ass'].status = 'uploaded';
+    if (uploadDanmaku) {
+      if (hasAss) files['video.ass'].status = 'uploaded';
+      if (hasXml) files['video.xml'].status = 'uploaded';
     }
   }
 
@@ -183,7 +200,7 @@ const analyzeConfig = (config: any) => {
         files[src].status = 'uploaded';
       }
     }
-    if (burnDelAss) {
+    if (burnDelAss && files['video.ass']) {
       if (isImmediate && upload) {
         // immediate 模式：.ass 已在 pipeline 开头被上传，烧录后被标记为 Deletable 并删除
         files['video.ass'].status = 'uploaded_deleted';
@@ -215,9 +232,10 @@ const analyzeConfig = (config: any) => {
     if (cover) {
       files['cover.jpg'].status = 'uploaded';
     }
-    // 上传弹幕字幕（需 after_process 模式，immediate 模式下 .ass 尚未生成）
-    if (uploadAss) {
-      files['video.ass'].status = 'uploaded';
+    // 上传弹幕文件（ASS/XML）
+    if (uploadDanmaku) {
+      if (hasAss) files['video.ass'].status = 'uploaded';
+      if (hasXml) files['video.xml'].status = 'uploaded';
     }
 
     // 删除逻辑
@@ -240,10 +258,11 @@ const analyzeConfig = (config: any) => {
     }
   }
 
-  // 兜底逻辑：清理无关联视频文件的 .ass 文件
-  if (files['video.ass'] && files['video.ass'].status === 'kept') {
+  // 兜底逻辑：清理无关联视频文件的 ASS/XML 文件
+  for (const sidecar of formats.map(format => `video.${format}`)) {
+    if (!files[sidecar] || files[sidecar].status !== 'kept') continue;
     const hasVideo = Object.entries(files).some(([name, f]) => {
-      if (name === 'video.ass') return false;
+      if (name === sidecar) return false;
       const ext = f.ext.toLowerCase();
       if (ext !== '.flv' && ext !== '.mp4' && ext !== '.mkv') return false;
       // 只有 kept 或 uploaded（本地保留）的视频才算"存在"
@@ -251,7 +270,7 @@ const analyzeConfig = (config: any) => {
       return f.status === 'kept' || f.status === 'uploaded';
     });
     if (!hasVideo) {
-      files['video.ass'].status = 'deleted';
+      files[sidecar].status = 'deleted';
     }
   }
 
@@ -468,7 +487,7 @@ const CloudUploadSettings: React.FC<CloudUploadSettingsProps> = ({ config, form 
           <Switch onChange={handleDeleteAllAfterChange} />
         </Form.Item>
       </ConfigField>
-      <ConfigField label="上传弹幕字幕" description="同时上传与视频同名的 .ass 弹幕字幕文件到云存储。需开启弹幕录制">
+      <ConfigField label="上传弹幕文件" description="同时上传与视频同名的 .ass/.xml 弹幕文件到云存储。需开启弹幕录制">
         <Form.Item name={['on_record_finished', 'cloud_upload', 'upload_subtitles']} valuePropName="checked" noStyle>
           <Switch />
         </Form.Item>
