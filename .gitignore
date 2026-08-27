@@ -201,3 +201,7 @@ docker-context/bin/*
 !docker-context/bin/.gitkeep
 docker-context/tools/*
 !docker-context/tools/.gitkeep
+
+.trellis
+.vscode
+.gemini
