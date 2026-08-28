@@ -64,6 +64,23 @@ func getConfig() (*configs.Config, error) {
 			return config, nil
 		}
 	}
+	if config.File == "" {
+		paths, pathErr := resolveConfigPathsBesidesExecutable()
+		if pathErr == nil && len(paths) > 0 {
+			config.File = paths[0]
+			if _, statErr := os.Stat(config.File); statErr == nil {
+				fmt.Fprintf(os.Stderr, "[Config] 未指定配置文件，将在首次保存时覆盖现有文件: %s\n", config.File)
+			} else if os.IsNotExist(statErr) {
+				fmt.Fprintf(os.Stderr, "[Config] 未指定配置文件，将在首次保存时创建: %s\n", config.File)
+			} else {
+				fmt.Fprintf(os.Stderr, "[Config] 未指定配置文件，已关联路径但无法检查文件状态 (%s): %v\n", config.File, statErr)
+			}
+		} else if pathErr != nil {
+			fmt.Fprintf(os.Stderr, "[Config] 未指定配置文件且无法确定配置路径，配置变更将仅在内存中生效: %v\n", pathErr)
+		} else {
+			fmt.Fprintln(os.Stderr, "[Config] 未指定配置文件且没有可用的配置路径，配置变更将仅在内存中生效")
+		}
+	}
 	if vErr := config.Verify(); vErr != nil {
 		return config, vErr
 	}
@@ -71,34 +88,47 @@ func getConfig() (*configs.Config, error) {
 	return config, nil
 }
 
-func getConfigBesidesExecutable() (*configs.Config, error) {
+// resolveConfigPathsBesidesExecutable 推导可执行文件旁的配置文件候选路径。
+//
+// 启动器子进程优先使用启动器入口程序所在目录的配置文件，其次使用当前可执行文件所在目录的配置文件。
+// 返回值按优先级排列；无法定位可执行文件时返回错误。
+func resolveConfigPathsBesidesExecutable() ([]string, error) {
 	exePath, err := os.Executable()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("获取可执行文件路径失败: %w", err)
 	}
 
-	// 如果是由 Launcher 启动的子进程（新版本 exe 位于 .appdata/versions/{version}/），
-	// 优先从 Launcher（入口程序）的 exe 旁边查找用户的真实 config.yml。
-	// 因为 release 压缩包解压后，新版本 exe 旁边总会有一个默认的 config.yml，
-	// 必须优先使用用户原始目录的配置文件。
+	paths := make([]string, 0, 2)
 	if launcherExe := os.Getenv("BILILIVE_LAUNCHER_EXE"); launcherExe != "" {
-		launcherConfigPath := filepath.Join(filepath.Dir(launcherExe), "config.yml")
-		if config, loadErr := configs.NewConfigWithFile(launcherConfigPath); loadErr == nil {
-			fmt.Fprintf(os.Stderr, "[Config] 使用 Launcher 目录的配置文件: %s\n", launcherConfigPath)
-			return config, nil
-		} else {
-			fmt.Fprintf(os.Stderr, "[Config] Launcher 配置文件加载失败 (%s): %v，回退到程序所在目录\n", launcherConfigPath, loadErr)
-		}
+		paths = append(paths, filepath.Join(filepath.Dir(launcherExe), "config.yml"))
 	}
+	paths = append(paths, filepath.Join(filepath.Dir(exePath), "config.yml"))
+	return paths, nil
+}
 
-	// 回退：在当前程序所在目录查找（用户直接双击运行的场景）
-	configPath := filepath.Join(filepath.Dir(exePath), "config.yml")
-	fmt.Fprintf(os.Stderr, "[Config] 使用当前程序所在目录的配置文件: %s\n", configPath)
-	config, err := configs.NewConfigWithFile(configPath)
+func getConfigBesidesExecutable() (*configs.Config, error) {
+	paths, err := resolveConfigPathsBesidesExecutable()
 	if err != nil {
 		return nil, err
 	}
-	return config, nil
+	var lastErr error
+	for index, configPath := range paths {
+		if index > 0 || os.Getenv("BILILIVE_LAUNCHER_EXE") == "" {
+			fmt.Fprintf(os.Stderr, "[Config] 使用当前程序所在目录的配置文件: %s\n", configPath)
+		}
+		config, loadErr := configs.NewConfigWithFile(configPath)
+		if loadErr == nil {
+			if index == 0 && os.Getenv("BILILIVE_LAUNCHER_EXE") != "" {
+				fmt.Fprintf(os.Stderr, "[Config] 使用 Launcher 目录的配置文件: %s\n", configPath)
+			}
+			return config, nil
+		}
+		lastErr = loadErr
+		if index == 0 && os.Getenv("BILILIVE_LAUNCHER_EXE") != "" {
+			fmt.Fprintf(os.Stderr, "[Config] Launcher 配置文件加载失败 (%s): %v，回退到程序所在目录\n", configPath, loadErr)
+		}
+	}
+	return nil, lastErr
 }
 
 // shouldRunAsLauncher 检查是否需要进入 launcher 模式

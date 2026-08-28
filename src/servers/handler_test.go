@@ -51,6 +51,23 @@ func TestGetSoopLiveAuthConfigDoesNotExposeSavedPassword(t *testing.T) {
 	assert.False(t, exists)
 }
 
+func TestPutConfigWithoutFileReturnsWarning(t *testing.T) {
+	previous := configs.GetCurrentConfig()
+	t.Cleanup(func() {
+		configs.SetCurrentConfig(previous)
+	})
+	configs.SetCurrentConfig(configs.NewConfig())
+
+	recorder := httptest.NewRecorder()
+	putConfig(recorder, nil)
+
+	assert.Equal(t, 200, recorder.Code)
+	var resp commonResp
+	assert.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &resp))
+	assert.Zero(t, resp.ErrNo)
+	assert.Contains(t, resp.ErrMsg, "设置仅在内存中生效")
+}
+
 func TestGetFileInfoAssociatesRootSidecarsWithPartVideo(t *testing.T) {
 	tmpDir := t.TempDir()
 	for _, name := range []string{"record_PART000.flv", "record.ass", "record.xml"} {

@@ -945,7 +945,15 @@ func getConfig(writer http.ResponseWriter, r *http.Request) {
 func putConfig(writer http.ResponseWriter, r *http.Request) {
 	config := configs.GetCurrentConfig()
 	config.RefreshLiveRoomIndexCache()
+	if config.File == "" {
+		writeJsonWithStatusCode(writer, http.StatusOK, commonResp{
+			ErrMsg: "当前运行未关联配置文件，设置仅在内存中生效，重启后将丢失；请使用 -c 指定配置文件",
+			Data:   "OK",
+		})
+		return
+	}
 	if err := config.Marshal(); err != nil {
+		applog.GetLogger().Errorf("保存配置文件失败 (%s): %v", config.File, err)
 		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{
 			ErrNo:  http.StatusBadRequest,
 			ErrMsg: err.Error(),

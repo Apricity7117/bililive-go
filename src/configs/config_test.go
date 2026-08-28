@@ -46,6 +46,23 @@ func TestConfig_Verify(t *testing.T) {
 	assert.Error(t, cfg.Verify())
 }
 
+func TestDefaultUpdateConfig(t *testing.T) {
+	cfg := NewConfig()
+	assert.False(t, cfg.Update.AutoCheck)
+	assert.Equal(t, 6, cfg.Update.CheckIntervalHours)
+	assert.False(t, cfg.Update.AutoDownload)
+	assert.False(t, cfg.Update.IncludePrerelease)
+
+	configured, err := NewConfigWithBytes([]byte(`
+update:
+  auto_check: true
+  auto_download: true
+`))
+	assert.NoError(t, err)
+	assert.True(t, configured.Update.AutoCheck)
+	assert.True(t, configured.Update.AutoDownload)
+}
+
 func TestResolveConfigForRoom(t *testing.T) {
 	cfg := &Config{
 		Interval:   60,

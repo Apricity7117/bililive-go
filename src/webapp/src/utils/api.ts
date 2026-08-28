@@ -6,6 +6,7 @@
 
 import Utils from './common';
 import { StreamPreferenceV2 } from '../types/stream';
+import { message } from 'antd';
 
 const utils = new Utils();
 
@@ -104,13 +105,15 @@ class API {
         this.saveSettings()
             .then((rsp: any) => {
                 if (rsp.err_no === 0) {
-                    console.log('Save Settings success !!');
+                    if (rsp.err_msg) {
+                        message.warning(rsp.err_msg);
+                    }
                 } else {
-                    console.log('Server Error !!');
+                    message.error(rsp.err_msg || '保存设置失败');
                 }
             })
             .catch(err => {
-                alert(`保存设置失败:\n${err}`);
+                message.error(`保存设置失败: ${err?.message || err}`);
             })
     }
 
@@ -501,4 +504,3 @@ class API {
 }
 
 export default API;
-

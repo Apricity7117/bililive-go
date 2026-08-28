@@ -8,6 +8,7 @@ import (
 
 	"github.com/bililive-go/bililive-go/src/types"
 	"github.com/stretchr/testify/assert"
+	"gopkg.in/yaml.v3"
 )
 
 func TestPersistence(t *testing.T) {
@@ -61,6 +62,20 @@ live_rooms:
 	assert.NoError(t, err)
 	assert.Equal(t, string(contentAfter), string(contentAfterTransient), "File content should not change")
 
+}
+
+func TestMarshalCreatesParentDirectory(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "nested", "config.yml")
+	cfg := NewConfig()
+	cfg.File = configFile
+
+	assert.NoError(t, cfg.Marshal())
+	content, err := os.ReadFile(configFile)
+	assert.NoError(t, err)
+	assert.Contains(t, string(content), "这个配置文件内的注释是自动生成的")
+
+	var decoded Config
+	assert.NoError(t, yaml.Unmarshal(content, &decoded))
 }
 
 // TestReadAppDataPathFromFile_MinimalParsing 测试最小解析，忽略其他不兼容字段

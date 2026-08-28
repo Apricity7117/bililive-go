@@ -557,11 +557,11 @@ var defaultOpenListConfig = OpenListConfig{
 
 // UpdateConfig 自动更新配置
 type UpdateConfig struct {
-	// AutoCheck 是否启用自动检查更新（默认 true）
+	// AutoCheck 是否启用自动检查更新（默认 false）
 	AutoCheck bool `yaml:"auto_check" json:"auto_check"`
 	// CheckIntervalHours 检查更新间隔（小时，默认 6）
 	CheckIntervalHours int `yaml:"check_interval_hours" json:"check_interval_hours"`
-	// AutoDownload 是否自动下载更新（默认 true）
+	// AutoDownload 是否自动下载更新（默认 false）
 	// false 时仅检查并通知，需用户手动触发下载
 	AutoDownload bool `yaml:"auto_download" json:"auto_download"`
 	// IncludePrerelease 是否包含预发布版本（默认 false）
@@ -569,9 +569,9 @@ type UpdateConfig struct {
 }
 
 var defaultUpdateConfig = UpdateConfig{
-	AutoCheck:          true,
+	AutoCheck:          false,
 	CheckIntervalHours: 6,
-	AutoDownload:       true,
+	AutoDownload:       false,
 	IncludePrerelease:  false,
 }
 
@@ -1533,6 +1533,9 @@ func (c *Config) Marshal() error {
 		return err
 	}
 
+	if err := os.MkdirAll(filepath.Dir(c.File), 0755); err != nil {
+		return fmt.Errorf("创建配置目录失败: %w", err)
+	}
 	return os.WriteFile(c.File, buf.Bytes(), 0644)
 }
 

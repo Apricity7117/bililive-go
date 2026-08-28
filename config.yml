@@ -150,7 +150,7 @@ openlist:
   username: ""
   password: ""
 update:
-  auto_check: true
+  auto_check: false
   check_interval_hours: 6
-  auto_download: true
+  auto_download: false
   include_prerelease: false

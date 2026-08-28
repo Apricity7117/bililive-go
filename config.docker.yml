@@ -39,3 +39,9 @@ notify:
     URL: https://ntfy.sh/xxxx
     token: tk_xxxxxxxxx
     tag: new
+
+update:
+  auto_check: false
+  check_interval_hours: 6
+  auto_download: false
+  include_prerelease: false
