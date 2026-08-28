@@ -1,10 +1,11 @@
 import React from "react";
-import { Button, Divider, Table, Tag, Tabs, Row, Col, Tooltip, message, List, Typography, Switch, Space, Popconfirm, Select } from 'antd';
-import { EditOutlined, SyncOutlined, CloudSyncOutlined, ReloadOutlined, SwapOutlined, CheckCircleOutlined, ExclamationCircleOutlined } from '@ant-design/icons';
+import { Button, Divider, Table, Tag, Tabs, Row, Col, Tooltip, message, List, Typography, Switch, Space, Popconfirm, Select, Spin } from 'antd';
+import { EditOutlined, SyncOutlined, CloudSyncOutlined, ReloadOutlined, SwapOutlined, CheckCircleOutlined, ExclamationCircleOutlined, CommentOutlined } from '@ant-design/icons';
 import PopDialog from '../pop-dialog/index';
-import AddRoomDialog from '../add-room-dialog/index';
+import BatchAddRoomDialog from '../batch-add-room-dialog/index';
 import LogPanel from '../log-panel/index';
 import HistoryPanel from '../history-panel/index';
+import DanmakuPanel, { DanmakuMessage } from '../danmaku-panel/index';
 import API from '../../utils/api';
 import { subscribeSSE, unsubscribeSSE, SSEMessage } from '../../utils/sse';
 import { isListSSEEnabled, setListSSEEnabled, getPollIntervalMs } from '../../utils/settings';
@@ -301,7 +302,7 @@ type RefreshStatus = 'idle' | 'waiting_interval' | 'waiting_rate_limit' | 'refre
 interface IState {
     list: ItemData[],
     cookieList: CookieItemData[],
-    addRoomDialogVisible: boolean,
+    batchAddDialogVisible: boolean,
     window: any,
     expandedRowKeys: string[],  // 展开的行
     expandedDetails: { [key: string]: any }, // 直播间详细信息缓存
@@ -314,6 +315,8 @@ interface IState {
     listSSESubscription: string | null, // 列表级别的SSE订阅ID
     enableListSSE: boolean, // 是否启用列表级别SSE（从localStorage读取）
     sortedInfo: { columnKey: string | null; order: 'ascend' | 'descend' | null }, // 表格排序状态
+    danmakuMessages: { [key: string]: DanmakuMessage[] }, // roomId -> 弹幕消息列表
+    expandedActiveTabs: { [key: string]: string }, // roomId -> 当前激活的 tab key
 }
 
 interface ItemData {
@@ -324,6 +327,9 @@ interface ItemData {
     tags: string[],
     listening: boolean
     roomId: string
+    notifyOnly: boolean
+    isLive: boolean
+    isRecording: boolean
 }
 interface CookieItemData {
     Platform_cn_name: string,
@@ -338,8 +344,9 @@ interface Room {
 }
 
 class LiveList extends React.Component<Props, IState> {
-    //子控件
-    child!: AddRoomDialog;
+    //弹幕批量缓冲（高频场景优化）
+    private danmakuBuffer: { [roomId: string]: DanmakuMessage[] } = {};
+    private danmakuFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
     //cookie开窗
     cookieChild!: EditCookieDialog;
@@ -372,6 +379,9 @@ class LiveList extends React.Component<Props, IState> {
                     }
                     if (tag === '初始化') {
                         color = 'orange';
+                    }
+                    if (tag === '仅提醒') {
+                        color = 'purple';
                     }
 
                     return (
@@ -427,6 +437,46 @@ class LiveList extends React.Component<Props, IState> {
                     }}>
                     <Button type="link" size="small">{listening ? "停止监控" : "开启监控"}</Button>
                 </PopDialog>
+                {/* 仅提醒模式下的手动录制按钮 */}
+                {data.notifyOnly && data.isLive && !data.isRecording && (
+                    <>
+                        <Divider type="vertical" />
+                        <PopDialog
+                            title="确定开始录制？"
+                            onConfirm={(e) => {
+                                api.startRecordDirect(data.roomId)
+                                    .then(rsp => {
+                                        message.success('已开始录制');
+                                        this.refresh();
+                                    })
+                                    .catch(err => {
+                                        alert(`开始录制失败:\n${err}`);
+                                    });
+                            }}>
+                            <Button type="primary" size="small" danger>开始录制</Button>
+                        </PopDialog>
+                    </>
+                )}
+                {/* 仅提醒模式下的停止录制按钮 */}
+                {data.notifyOnly && data.isLive && data.isRecording && (
+                    <>
+                        <Divider type="vertical" />
+                        <PopDialog
+                            title="确定停止录制？"
+                            onConfirm={(e) => {
+                                api.stopRecordDirect(data.roomId)
+                                    .then(rsp => {
+                                        message.success('已停止录制');
+                                        this.refresh();
+                                    })
+                                    .catch(err => {
+                                        alert(`停止录制失败:\n${err}`);
+                                    });
+                            }}>
+                            <Button type="default" size="small">停止录制</Button>
+                        </PopDialog>
+                    </>
+                )}
                 <Divider type="vertical" />
                 <PopDialog title="确定删除当前直播间？"
                     onConfirm={(e) => {
@@ -561,7 +611,7 @@ class LiveList extends React.Component<Props, IState> {
         this.state = {
             list: [],
             cookieList: [],
-            addRoomDialogVisible: false,
+            batchAddDialogVisible: false,
             window: window,
             expandedRowKeys: [],
             expandedDetails: {},
@@ -574,6 +624,8 @@ class LiveList extends React.Component<Props, IState> {
             listSSESubscription: null,
             enableListSSE: isListSSEEnabled(),
             sortedInfo: savedSortedInfo,
+            danmakuMessages: {},
+            expandedActiveTabs: {},
         }
     }
 
@@ -816,6 +868,12 @@ class LiveList extends React.Component<Props, IState> {
         //clear refresh timer
         clearInterval(this.timer);
         clearInterval(this.countdownTimer);
+        // 清理弹幕批量缓冲
+        if (this.danmakuFlushTimer) {
+            clearTimeout(this.danmakuFlushTimer);
+            this.danmakuFlushTimer = null;
+        }
+        this.danmakuBuffer = {};
 
         // 移除localStorage设置变化监听
         window.removeEventListener('localSettingsChanged', this.handleLocalSettingsChange as EventListener);
@@ -830,19 +888,8 @@ class LiveList extends React.Component<Props, IState> {
         });
     }
 
-    onRef = (ref: AddRoomDialog) => {
-        this.child = ref
-    }
-
     onCookieRef = (ref: EditCookieDialog) => {
         this.cookieChild = ref
-    }
-
-    /**
-     * 当添加房间按钮点击，弹出Dialog
-     */
-    onAddRoomClick = () => {
-        this.child.showModal()
     }
 
     onEditCookitClick = (data: any) => {
@@ -904,6 +951,11 @@ class LiveList extends React.Component<Props, IState> {
                         tags.push('初始化')
                     }
 
+                    // 仅提醒模式标签
+                    if (item.notify_only === true) {
+                        tags.push('仅提醒')
+                    }
+
                     return {
                         key: index + 1,
                         name: item.nick_name || item.host_name,
@@ -915,7 +967,10 @@ class LiveList extends React.Component<Props, IState> {
                         address: item.platform_cn_name,
                         tags,
                         listening: item.listening,
-                        roomId: item.id
+                        roomId: item.id,
+                        notifyOnly: item.notify_only || false,
+                        isLive: item.status || false,
+                        isRecording: (item.recording || item.recording_preparing) || false,
                     };
                 });
             })
@@ -1022,16 +1077,24 @@ class LiveList extends React.Component<Props, IState> {
                 const newCountdowns = { ...prevState.countdownTimers };
                 const newLastUpdateTimes = { ...prevState.lastUpdateTimes };
                 const newRefreshStatus = { ...prevState.refreshStatus };
+                const newDanmakuMessages = { ...prevState.danmakuMessages };
+                const newActiveTabs = { ...prevState.expandedActiveTabs };
                 delete newSubscriptions[roomId];
                 delete newCountdowns[roomId];
                 delete newLastUpdateTimes[roomId];
                 delete newRefreshStatus[roomId];
+                delete newDanmakuMessages[roomId];
+                delete newActiveTabs[roomId];
+                // 清理弹幕缓冲
+                delete this.danmakuBuffer[roomId];
                 return {
                     expandedRowKeys: prevState.expandedRowKeys.filter(key => key !== roomId),
                     sseSubscriptions: newSubscriptions,
                     countdownTimers: newCountdowns,
                     lastUpdateTimes: newLastUpdateTimes,
-                    refreshStatus: newRefreshStatus
+                    refreshStatus: newRefreshStatus,
+                    danmakuMessages: newDanmakuMessages,
+                    expandedActiveTabs: newActiveTabs,
                 };
             });
         } else {
@@ -1126,7 +1189,43 @@ class LiveList extends React.Component<Props, IState> {
                     };
                 });
                 break;
+
+            case 'danmaku':
+                // 只在"实时弹幕"Tab 激活时累积消息
+                if (this.state.expandedActiveTabs[roomId] === 'danmaku' &&
+                    message.data && message.data.type && message.data.username && message.data.timestamp) {
+                    // 写入缓冲区，不立即 setState
+                    if (!this.danmakuBuffer[roomId]) {
+                        this.danmakuBuffer[roomId] = [];
+                    }
+                    this.danmakuBuffer[roomId].push(message.data as DanmakuMessage);
+                    // 启动 flush 定时器（如果还没启动）
+                    if (!this.danmakuFlushTimer) {
+                        this.danmakuFlushTimer = setTimeout(() => this.flushDanmakuBuffer(), 100);
+                    }
+                }
+                break;
         }
+    }
+
+    // 批量 flush 弹幕缓冲到 state（每 100ms 最多一次 setState）
+    flushDanmakuBuffer = () => {
+        this.danmakuFlushTimer = null;
+        const entries = Object.entries(this.danmakuBuffer);
+        if (entries.length === 0) return;
+
+        // 清空缓冲区
+        this.danmakuBuffer = {};
+
+        this.setState(prevState => {
+            const newMsgs = { ...prevState.danmakuMessages };
+            for (const [roomId, msgs] of entries) {
+                if (prevState.expandedActiveTabs[roomId] !== 'danmaku') continue;
+                const current = newMsgs[roomId] || [];
+                newMsgs[roomId] = [...current, ...msgs].slice(-500);
+            }
+            return { danmakuMessages: newMsgs };
+        });
     }
 
     loadRoomDetail = (roomId: string) => {
@@ -1655,6 +1754,30 @@ class LiveList extends React.Component<Props, IState> {
                                     <span style={configLabelStyle}>录制开始</span>
                                     <span>{detail.last_record_time || (detail.recording ? '获取中...' : '未在录制')}</span>
                                 </div>
+                                {detail.recorder_status?.danmaku_running !== undefined && (
+                                    <>
+                                        <div style={configRowStyle}>
+                                            <span style={configLabelStyle}>弹幕录制</span>
+                                            <Tag color={detail.recorder_status.danmaku_running ? 'cyan' : 'default'}>
+                                                {detail.recorder_status.danmaku_running ? '连接中' : '已停止'}
+                                            </Tag>
+                                        </div>
+                                        <div style={configRowStyle}>
+                                            <span style={configLabelStyle}>弹幕数量</span>
+                                            <span>{detail.recorder_status.danmaku_count ?? 0} 条</span>
+                                        </div>
+                                        {detail.recorder_status.danmaku_output && (
+                                            <div style={{ ...configRowStyle, borderBottom: 'none' }}>
+                                                <span style={configLabelStyle}>弹幕文件</span>
+                                                <Tooltip title={detail.recorder_status.danmaku_output}>
+                                                    <span style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', verticalAlign: 'bottom' }}>
+                                                        {detail.recorder_status.danmaku_output.split(/[/\\]/).pop()}
+                                                    </span>
+                                                </Tooltip>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
                             </div>
 
                             <Divider style={{ margin: '8px 0' }}>平台访问频率控制</Divider>
@@ -1824,6 +1947,25 @@ class LiveList extends React.Component<Props, IState> {
                         borderBottom: '1px solid #e8e8e8',
                         borderRadius: '6px 6px 0 0'
                     }}
+                    onChange={(key) => {
+                        if (key === 'danmaku') {
+                            // 切换到弹幕Tab：开始累积消息
+                            this.setState(prevState => ({
+                                expandedActiveTabs: { ...prevState.expandedActiveTabs, [liveId]: 'danmaku' },
+                                danmakuMessages: { ...prevState.danmakuMessages, [liveId]: [] },
+                            }));
+                        } else {
+                            // 切换到其他Tab：停止累积并清空消息，释放内存
+                            delete this.danmakuBuffer[liveId];
+                            this.setState(prevState => {
+                                const newTabs = { ...prevState.expandedActiveTabs };
+                                const newMsgs = { ...prevState.danmakuMessages };
+                                delete newTabs[liveId];
+                                delete newMsgs[liveId];
+                                return { expandedActiveTabs: newTabs, danmakuMessages: newMsgs };
+                            });
+                        }
+                    }}
                 >
                     <Tabs.TabPane tab="运行时信息" key="runtime">
                         {renderRuntimePanel()}
@@ -1839,6 +1981,8 @@ class LiveList extends React.Component<Props, IState> {
                                         await api.updateRoomConfigById(detail.live_id, updates);
                                         // 更新后重新加载详情以获取最新配置状态
                                         await this.loadRoomDetail(record.roomId);
+                                        // 立即刷新主列表以反映配置变更
+                                        this.requestListData();
                                     }}
                                     loading={false}
                                     onRefresh={() => this.loadRoomDetail(record.roomId)}
@@ -1853,6 +1997,42 @@ class LiveList extends React.Component<Props, IState> {
                     </Tabs.TabPane>
                     <Tabs.TabPane tab="直播历史" key="history">
                         <HistoryPanel roomId={record.roomId} roomName={record.name} />
+                    </Tabs.TabPane>
+                    <Tabs.TabPane tab="实时弹幕" key="danmaku">
+                        <div style={{
+                            padding: '12px 16px',
+                            background: '#111',
+                            borderRadius: '0 0 6px 6px',
+                            borderLeft: '1px solid rgba(255,255,255,0.06)',
+                            borderRight: '1px solid rgba(255,255,255,0.06)',
+                            borderBottom: '1px solid rgba(255,255,255,0.06)',
+                        }}>
+                            {detail?.recorder_status?.danmaku_running ? (
+                                <DanmakuPanel
+                                    messages={this.state.danmakuMessages[liveId] || []}
+                                />
+                            ) : detail?.recording && detail?.room_config?.danmaku_enable && detail?.recorder_status?.danmaku_running === false ? (
+                                <div style={{ padding: '40px 0', textAlign: 'center', color: '#555' }}>
+                                    <CommentOutlined style={{ fontSize: 32, marginBottom: 12, opacity: 0.3 }} />
+                                    <div>弹幕录制已停止</div>
+                                </div>
+                            ) : detail?.recording && !detail?.room_config?.danmaku_enable ? (
+                                <div style={{ padding: '40px 0', textAlign: 'center', color: '#555' }}>
+                                    <CommentOutlined style={{ fontSize: 32, marginBottom: 12, opacity: 0.3 }} />
+                                    <div>弹幕录制未启用</div>
+                                </div>
+                            ) : detail?.recording ? (
+                                <div style={{ padding: '40px 0', textAlign: 'center', color: '#555' }}>
+                                    <Spin size="small" />
+                                    <div style={{ marginTop: 12, fontSize: 13 }}>弹幕连接中...</div>
+                                </div>
+                            ) : (
+                                <div style={{ padding: '40px 0', textAlign: 'center', color: '#555' }}>
+                                    <CommentOutlined style={{ fontSize: 32, marginBottom: 12, opacity: 0.3 }} />
+                                    <div>录制开始后可查看实时弹幕</div>
+                                </div>
+                            )}
+                        </div>
                     </Tabs.TabPane>
                 </Tabs>
             </div>
@@ -1869,7 +2049,7 @@ class LiveList extends React.Component<Props, IState> {
                 column.onFilter = (value: string | number | boolean, record: ItemData) => record.address === value;
             }
             if (column.key === 'tags') {
-                column.filters = ['初始化', '监控中', '录制中', '录制准备中', '已停止'].map(text => ({ text, value: text }));
+                column.filters = ['初始化', '监控中', '录制中', '录制准备中', '仅提醒', '已停止'].map(text => ({ text, value: text }));
                 column.onFilter = (value: string | number | boolean, record: ItemData) => record.tags.includes(value as string);
             }
         })
@@ -1908,10 +2088,14 @@ class LiveList extends React.Component<Props, IState> {
                                     </Space>
                                 </Tooltip>
                                 <Button key="2" type="default" onClick={this.onSettingSave}>保存设置</Button>
-                                <Button key="1" type="primary" onClick={this.onAddRoomClick}>
+                                <Button key="1" type="primary" onClick={() => this.setState({ batchAddDialogVisible: true })}>
                                     添加房间
                                 </Button>
-                                <AddRoomDialog key="0" ref={this.onRef} refresh={this.refresh} />
+                                <BatchAddRoomDialog
+                                    visible={this.state.batchAddDialogVisible}
+                                    onClose={() => this.setState({ batchAddDialogVisible: false })}
+                                    onSuccess={this.refresh}
+                                />
                             </div>
                         </div>
                         <Table

@@ -3,6 +3,7 @@ package listeners
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -25,7 +26,9 @@ const (
 
 type Listener interface {
 	Start() error
+	StartWithInfo(info *live.Info) error
 	Close()
+	CloseSync()
 }
 
 func NewListener(ctx context.Context, live live.Live) Listener {
@@ -55,30 +58,84 @@ type listener struct {
 }
 
 func (l *listener) Start() error {
+	return l.start(nil)
+}
+
+// StartWithInfo 使用已经获取到的直播间信息启动监听器，避免初始化交接后立即重复请求平台。
+func (l *listener) StartWithInfo(info *live.Info) error {
+	return l.start(info)
+}
+
+func (l *listener) start(initialInfo *live.Info) error {
 	if !atomic.CompareAndSwapUint32(&l.state, begin, pending) {
 		return nil
 	}
 	defer atomic.CompareAndSwapUint32(&l.state, pending, running)
 
 	l.ed.DispatchEvent(events.NewEvent(ListenStart, l.Live))
-	l.refresh()
-	bilisentry.Go(func() { l.run() })
+
+	// 首次信息获取放到后台执行。调用方 manager.AddListener 全程持有管理器的全局锁，
+	// 而 refresh 是一次真实的网络请求，还要排队等待平台访问频率限制；
+	// 几百个直播间串行下来会把锁占用好几分钟，期间任何增删直播间的操作都会被卡住。
+	bilisentry.Go(func() {
+		if !l.isStopped() {
+			if initialInfo != nil {
+				l.processInfo(initialInfo)
+			} else {
+				l.refresh()
+			}
+		}
+		l.run()
+	})
 	return nil
 }
 
+// isStopped 返回 listener 是否已经被关闭
+func (l *listener) isStopped() bool {
+	select {
+	case <-l.stop:
+		return true
+	default:
+		return false
+	}
+}
+
 func (l *listener) Close() {
+	l.close(false)
+}
+
+// CloseSync 同步完成 ListenStop 的所有处理器，仅用于初始化 listener 的交接路径。
+// 普通关闭仍保持异步，避免改变其他调用方的延迟语义。
+func (l *listener) CloseSync() {
+	l.close(true)
+}
+
+func (l *listener) close(syncEvent bool) {
 	if !atomic.CompareAndSwapUint32(&l.state, running, stopped) {
 		return
 	}
-	l.ed.DispatchEvent(events.NewEvent(ListenStop, l.Live))
-	l.runCancel() // 取消 run 循环中的等待
+	l.runCancel() // 先取消等待并标记停止，禁止并发请求结果继续发布事件
 	close(l.stop)
+	event := events.NewEvent(ListenStop, l.Live)
+	if syncEvent {
+		l.ed.DispatchEventSync(event)
+	} else {
+		l.ed.DispatchEvent(event)
+	}
 }
 
 // sendLiveNotification 发送直播状态变更通知
 func (l *listener) sendLiveNotification(hostName, status string) {
+	// 检查是否为仅提醒模式
+	notifyOnly := false
+	if cfg := configs.GetCurrentConfig(); cfg != nil {
+		if room, err := cfg.GetLiveRoomByUrl(l.Live.GetRawUrl()); err == nil {
+			notifyOnly = room.NotifyOnly
+		}
+	}
+
 	// 发送通知
-	if err := notify.SendNotification(l.Live.GetLogger(), hostName, l.Live.GetPlatformCNName(), l.Live.GetRawUrl(), status); err != nil {
+	if err := notify.SendNotification(l.Live.GetLogger(), hostName, l.Live.GetPlatformCNName(), l.Live.GetRawUrl(), status, notifyOnly); err != nil {
 		l.Live.GetLogger().WithError(err).WithField("host", hostName).Error("failed to send notification")
 	}
 }
@@ -87,13 +144,24 @@ func (l *listener) sendLiveNotification(hostName, status string) {
 func (l *listener) refresh() {
 	info, err := l.Live.GetInfo()
 	if err != nil {
-		l.Live.GetLogger().
-			WithError(err).
-			WithField("url", l.Live.GetRawUrl()).
-			Error("failed to load room info")
+		l.logGetInfoError(err)
 		return
 	}
 	l.processInfo(info)
+}
+
+// logGetInfoError 记录获取直播间信息失败的日志。
+// 依赖工具尚未就绪不是异常状况（工具还在下载/启动中，稍后调度器会自动恢复），
+// 几百个直播间同时报错只会淹没日志，因此降级为 debug。
+func (l *listener) logGetInfoError(err error) {
+	entry := l.Live.GetLogger().
+		WithError(err).
+		WithField("url", l.Live.GetRawUrl())
+	if errors.Is(err, live.ErrPlatformToolsNotReady) {
+		entry.Debug("skip loading room info")
+		return
+	}
+	entry.Error("failed to load room info")
 }
 
 func (l *listener) run() {
@@ -111,10 +179,7 @@ func (l *listener) run() {
 				if l.runCtx.Err() != nil {
 					return
 				}
-				l.Live.GetLogger().
-					WithError(err).
-					WithField("url", l.Live.GetRawUrl()).
-					Error("failed to load room info")
+				l.logGetInfoError(err)
 				continue
 			}
 			l.processInfo(info)
@@ -124,11 +189,17 @@ func (l *listener) run() {
 
 // processInfo 处理获取到的直播间信息，检测状态变化并触发事件
 func (l *listener) processInfo(info *live.Info) {
+	// 初始化完成回调可能在 GetInfo 返回前同步替换并关闭当前 listener。
+	// 已关闭的旧 listener 不得再发布 LiveStart/LiveEnd，否则会与新 listener 的事件竞态。
+	if l.isStopped() {
+		return
+	}
+
 	// 尝试从缓存中获取主播姓名，以防API调用失败
 	hostName := info.HostName
 	if hostName == "" {
 		if wrappedLive, ok := l.Live.(*live.WrappedLive); ok {
-			if cachedInfo, get_err := wrappedLive.GetInfo(); get_err == nil && cachedInfo != nil {
+			if cachedInfo, found := wrappedLive.GetCachedInfo(); found {
 				hostName = cachedInfo.HostName
 			}
 		}

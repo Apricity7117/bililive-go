@@ -21,6 +21,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/pkg/parser"
 	bilisentry "github.com/bililive-go/bililive-go/src/pkg/sentry"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
+	"github.com/bililive-go/bililive-go/src/tools"
 )
 
 const (
@@ -39,6 +40,7 @@ func (b *builder) Build(cfg map[string]string, logger *livelogger.LiveLogger) (p
 	useFlvProxy := cfg["use_flv_proxy"] == "true"
 	return &Parser{
 		closeOnce:   new(sync.Once),
+		stopped:     make(chan struct{}),
 		statusReq:   make(chan struct{}, 1),
 		statusResp:  make(chan map[string]interface{}, 1),
 		timeoutInUs: cfg["timeout_in_us"],
@@ -53,6 +55,7 @@ type Parser struct {
 	cmdStdIn    io.WriteCloser
 	cmdStdout   io.ReadCloser
 	closeOnce   *sync.Once
+	stopped     chan struct{} // Stop() 被调用时关闭，用于中断 FFmpeg 就绪等待
 	timeoutInUs string
 	audioOnly   bool
 	useFlvProxy bool // 是否使用 FLV 代理分段
@@ -164,10 +167,26 @@ func (p *Parser) Status() (map[string]interface{}, error) {
 // 正确修复需要同时解决整条 context 传播链路（将 request context 替换为应用级 context），
 // 影响范围广，暂不在此处理。当前录制的停止完全由 recorder.Close() → parser.Stop() 控制。
 func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.StreamUrlInfo, live live.Live, file string) (err error) {
+	// Stop() 已被调用（p.closeOnce 已执行）时直接返回：此后再启动 FFmpeg 进程将无法
+	// 通过 Stop() 终止，会造成进程泄漏。这里先做一次廉价的非阻塞检查快速失败；真正消除
+	// 竞态的检查在下方持有 p.cmdLock 后、进程 Start() 前再做一次（与 Stop() 互斥）。
+	select {
+	case <-p.stopped:
+		return fmt.Errorf("parser stopped")
+	default:
+	}
 	url := streamUrlInfo.Url
 	ffmpegPath, err := utils.GetFFmpegPathForLive(ctx, live)
 	if err != nil {
-		return err
+		// 找不到 FFmpeg 且后台异步初始化（tools.FFmpegAsyncInit）仍在检测/下载时，
+		// 挂起等待其进入终态后重查一次，避免开播瞬间陷入"找不到 FFmpeg → 5 秒重试"
+		// 的失败循环；下载一完成录制立即开始。等待可被 ctx 取消或 Stop() 中断。
+		if waitErr := tools.WaitFFmpegAsyncInitDone(ctx, p.stopped); waitErr != nil {
+			return waitErr
+		}
+		if ffmpegPath, err = utils.GetFFmpegPathForLive(ctx, live); err != nil {
+			return err
+		}
 	}
 	headers := streamUrlInfo.HeadersForDownloader
 	ffUserAgent, exists := headers["User-Agent"]
@@ -270,6 +289,15 @@ func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.Stream
 	func() {
 		p.cmdLock.Lock()
 		defer p.cmdLock.Unlock()
+		// 与 Stop() 互斥的权威检查：Stop() 会先 close(p.stopped) 再抢 p.cmdLock 处理 p.cmd。
+		// 若此处观察到已 stopped，说明 Stop() 的清理不会覆盖到本次即将新建的进程，必须放弃
+		// 启动，否则该进程无人回收。错误由外层 if err != nil 分支统一清理 FLV 代理并返回。
+		select {
+		case <-p.stopped:
+			err = fmt.Errorf("parser stopped")
+			return
+		default:
+		}
 		p.cmd = exec.Command(ffmpegPath, args...)
 		if p.cmdStdIn, err = p.cmd.StdinPipe(); err != nil {
 			return
@@ -336,6 +364,9 @@ func (p *Parser) stopFlvProxy() {
 
 func (p *Parser) Stop() (err error) {
 	p.closeOnce.Do(func() {
+		// 中断可能正在进行的 FFmpeg 就绪等待
+		close(p.stopped)
+
 		// 先停止 FLV 代理
 		p.stopFlvProxy()
 

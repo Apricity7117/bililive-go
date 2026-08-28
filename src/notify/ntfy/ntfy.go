@@ -87,19 +87,25 @@ func sendNtfyRequest(url, token, tag, hostname, message, liveURL, schemeUrl stri
 }
 
 // SendMessage 发送ntfy开始录制消息
-func SendMessage(url, token, tag, hostname, platform, liveURL, schemeUrl string) error {
-	// 构造消息内容
-	message := fmt.Sprintf("%s正在录制中", platform)
-
-	// 发送请求
+func SendMessage(url, token, tag, hostname, platform, liveURL, schemeUrl string, isNotifyOnly ...bool) error {
+	notifyOnly := len(isNotifyOnly) > 0 && isNotifyOnly[0]
+	var message string
+	if notifyOnly {
+		message = fmt.Sprintf("%s已开播,请手动开始录制", platform)
+	} else {
+		message = fmt.Sprintf("%s正在录制中", platform)
+	}
 	return sendNtfyRequest(url, token, tag, hostname, message, liveURL, schemeUrl)
 }
 
 // SendStopMessage 发送ntfy停止录制消息
-func SendStopMessage(url, token, tag, hostname, platform, liveURL string) error {
-	// 构造消息内容
-	message := fmt.Sprintf("%s录制已停止", platform)
-
-	// 发送请求，注意停止录制通知不使用schemeUrl
+func SendStopMessage(url, token, tag, hostname, platform, liveURL string, isNotifyOnly ...bool) error {
+	notifyOnly := len(isNotifyOnly) > 0 && isNotifyOnly[0]
+	var message string
+	if notifyOnly {
+		message = fmt.Sprintf("%s已结束直播", platform)
+	} else {
+		message = fmt.Sprintf("%s录制已停止", platform)
+	}
 	return sendNtfyRequest(url, token, tag, hostname, message, liveURL, "")
 }

@@ -189,36 +189,36 @@
     }
   },
   "openlist": {
-    "v4.1.9": {
+    "v4.2.4": {
       "downloadUrl": {
         "darwin": {
           "amd64": [
-            "https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-darwin-amd64.tar.gz",
-            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-darwin-amd64.tar.gz"
+            "https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-darwin-amd64.tar.gz",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-darwin-amd64.tar.gz"
           ],
           "arm64": [
-            "https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-darwin-arm64.tar.gz",
-            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-darwin-arm64.tar.gz"
+            "https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-darwin-arm64.tar.gz",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-darwin-arm64.tar.gz"
           ]
         },
         "linux": {
           "amd64": [
-            "https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-linux-amd64.tar.gz",
-            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-linux-amd64.tar.gz"
+            "https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-linux-amd64.tar.gz",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-linux-amd64.tar.gz"
           ],
           "arm64": [
-            "https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-linux-arm64.tar.gz",
-            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-linux-arm64.tar.gz"
+            "https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-linux-arm64.tar.gz",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-linux-arm64.tar.gz"
           ],
           "arm": [
-            "https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-linux-armv7.tar.gz",
-            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-linux-armv7.tar.gz"
+            "https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-linux-arm-7.tar.gz",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-linux-arm-7.tar.gz"
           ]
         },
         "windows": {
           "amd64": [
-            "https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-windows-amd64.zip",
-            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-windows-amd64.zip"
+            "https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-windows-amd64.zip",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-windows-amd64.zip"
           ]
         }
       },
@@ -229,6 +229,58 @@
       },
       "printInfoCmd": [
         "version"
+      ]
+    }
+  },
+  "bililive-scheduler": {
+    "v0.1.0": {
+      "downloadUrl": {
+        "darwin": {
+          "amd64": [
+            "https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-darwin-amd64.zip",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-darwin-amd64.zip"
+          ],
+          "arm64": [
+            "https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-darwin-arm64.zip",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-darwin-arm64.zip"
+          ]
+        },
+        "linux": {
+          "amd64": [
+            "https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-linux-amd64.zip",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-linux-amd64.zip"
+          ],
+          "arm64": [
+            "https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-linux-arm64.zip",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-linux-arm64.zip"
+          ],
+          "arm": [
+            "https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-linux-arm.zip",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-linux-arm.zip"
+          ]
+        },
+        "windows": {
+          "amd64": [
+            "https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-windows-amd64.zip",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-windows-amd64.zip"
+          ],
+          "386": [
+            "https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-windows-386.zip",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-windows-386.zip"
+          ],
+          "arm64": [
+            "https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-windows-arm64.zip",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/Joftal/bililive-scheduler/releases/download/v0.1.0/bililive-scheduler-windows-arm64.zip"
+          ]
+        }
+      },
+      "pathToEntry": {
+        "darwin": "bililive-scheduler",
+        "linux": "bililive-scheduler",
+        "windows": "bililive-scheduler.exe"
+      },
+      "printInfoCmd": [
+        "--version"
       ]
     }
   }

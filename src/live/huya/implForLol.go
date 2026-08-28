@@ -54,6 +54,7 @@ func GetStreamInfos_ForLol(l *Live) (infos []*live.StreamUrlInfo, err error) {
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status code: %d", resp.StatusCode)
 	}

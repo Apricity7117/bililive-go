@@ -1,63 +1,112 @@
 package servers
 
 import (
+	"encoding/json"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/assert"
 
 	"github.com/bililive-go/bililive-go/src/configs"
 )
 
-func TestApplyOverridableConfigUpdatesDanmakuPartialAndClear(t *testing.T) {
-	oc := configs.OverridableConfig{}
-
-	applyOverridableConfigUpdates(&oc, map[string]interface{}{
+func TestApplyOverridableDanmakuUpdatesPreservesInheritance(t *testing.T) {
+	var override configs.OverridableConfig
+	applyOverridableConfigUpdates(&override, map[string]interface{}{
 		"danmaku": map[string]interface{}{
-			"enable": true,
+			"formats": []interface{}{"xml"},
 		},
 	})
-	if oc.Danmaku == nil || oc.Danmaku.Enable == nil || !*oc.Danmaku.Enable {
-		t.Fatalf("expected danmaku.enable override to be true, got %#v", oc.Danmaku)
-	}
-	if oc.Danmaku.SaveGift != nil || oc.Danmaku.UseServerTimestamp != nil || oc.Danmaku.UseCookie != nil {
-		t.Fatalf("expected unspecified danmaku fields to keep inheriting, got %#v", oc.Danmaku)
-	}
 
-	applyOverridableConfigUpdates(&oc, map[string]interface{}{
-		"danmaku": map[string]interface{}{
-			"enable":     nil,
-			"save_gift":  false,
-			"use_cookie": false,
-		},
-	})
-	if oc.Danmaku == nil ||
-		oc.Danmaku.Enable != nil ||
-		oc.Danmaku.SaveGift == nil || *oc.Danmaku.SaveGift ||
-		oc.Danmaku.UseCookie == nil || *oc.Danmaku.UseCookie {
-		t.Fatalf("expected enable cleared, save_gift false and use_cookie false override, got %#v", oc.Danmaku)
-	}
-
-	applyOverridableConfigUpdates(&oc, map[string]interface{}{
-		"danmaku": map[string]interface{}{
-			"save_gift":  nil,
-			"use_cookie": nil,
-		},
-	})
-	if oc.Danmaku != nil {
-		t.Fatalf("expected empty danmaku override to be removed, got %#v", oc.Danmaku)
+	if assert.NotNil(t, override.Danmaku) {
+		assert.Equal(t, []configs.DanmakuFormat{configs.DanmakuFormatXML}, override.Danmaku.Formats)
+		assert.Zero(t, override.Danmaku.FontSize)
+		assert.Nil(t, override.Danmaku.UseCookie)
 	}
 }
 
-func TestApplyOverridableConfigUpdatesDanmakuNullClearsAll(t *testing.T) {
-	enabled := true
-	oc := configs.OverridableConfig{
-		Danmaku: &configs.DanmakuOverride{
-			Enable: &enabled,
-		},
+func TestGetSoopLiveAuthConfigDoesNotExposeSavedPassword(t *testing.T) {
+	cfg := configs.NewConfig()
+	cfg.SoopLiveAuth.Username = "tester"
+	cfg.SoopLiveAuth.Password = "secret"
+	configs.SetCurrentConfig(cfg)
+
+	recorder := httptest.NewRecorder()
+	getSoopLiveAuthConfig(recorder, nil)
+
+	assert.Equal(t, 200, recorder.Code)
+
+	var resp commonResp
+	err := json.Unmarshal(recorder.Body.Bytes(), &resp)
+	assert.NoError(t, err)
+
+	data, ok := resp.Data.(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, "tester", data["username"])
+	assert.Equal(t, true, data["has_saved_credentials"])
+	_, exists := data["password"]
+	assert.False(t, exists)
+}
+
+func TestPutConfigWithoutFileReturnsWarning(t *testing.T) {
+	previous := configs.GetCurrentConfig()
+	t.Cleanup(func() {
+		configs.SetCurrentConfig(previous)
+	})
+	configs.SetCurrentConfig(configs.NewConfig())
+
+	recorder := httptest.NewRecorder()
+	putConfig(recorder, nil)
+
+	assert.Equal(t, 200, recorder.Code)
+	var resp commonResp
+	assert.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &resp))
+	assert.Zero(t, resp.ErrNo)
+	assert.Contains(t, resp.ErrMsg, "设置仅在内存中生效")
+}
+
+func TestGetFileInfoAssociatesRootSidecarsWithPartVideo(t *testing.T) {
+	tmpDir := t.TempDir()
+	for _, name := range []string{"record_PART000.flv", "record.ass", "record.xml"} {
+		assert.NoError(t, os.WriteFile(filepath.Join(tmpDir, name), []byte("data"), 0644))
+	}
+	cfg := configs.NewConfig()
+	cfg.OutPutPath = tmpDir
+	configs.SetCurrentConfig(cfg)
+
+	req := httptest.NewRequest("GET", "/api/file-info/", nil)
+	req = mux.SetURLVars(req, map[string]string{"path": ""})
+	resp := httptest.NewRecorder()
+	getFileInfo(resp, req)
+
+	assert.Equal(t, 200, resp.Code)
+	var payload struct {
+		Files []struct {
+			Name         string   `json:"name"`
+			SubtitleFile string   `json:"subtitle_file"`
+			DanmakuFiles []string `json:"danmaku_files"`
+		} `json:"files"`
+	}
+	assert.NoError(t, json.Unmarshal(resp.Body.Bytes(), &payload))
+	if assert.Len(t, payload.Files, 1) {
+		assert.Equal(t, "record_PART000.flv", payload.Files[0].Name)
+		assert.Equal(t, "record.ass", payload.Files[0].SubtitleFile)
+		assert.ElementsMatch(t, []string{"record.ass", "record.xml"}, payload.Files[0].DanmakuFiles)
+	}
+}
+
+func TestRemoveDanmakuSidecarsIncludesPartRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	partVideo := filepath.Join(tmpDir, "record_PART000.flv")
+	for _, name := range []string{"record_PART000.ass", "record_PART000.xml", "record.ass", "record.xml"} {
+		assert.NoError(t, os.WriteFile(filepath.Join(tmpDir, name), []byte("data"), 0644))
 	}
 
-	applyOverridableConfigUpdates(&oc, map[string]interface{}{
-		"danmaku": nil,
-	})
-	if oc.Danmaku != nil {
-		t.Fatalf("expected danmaku override to be cleared, got %#v", oc.Danmaku)
+	removeDanmakuSidecars(partVideo)
+	for _, name := range []string{"record_PART000.ass", "record_PART000.xml", "record.ass", "record.xml"} {
+		assert.NoFileExists(t, filepath.Join(tmpDir, name))
 	}
 }

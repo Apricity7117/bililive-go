@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -70,4 +71,52 @@ func TestPlatformRateLimiterUpdate(t *testing.T) {
 func TestConfigSyncRateLimits(t *testing.T) {
 	// 这个测试需要配置系统的支持，暂时跳过具体实现
 	t.Skip("Config sync test requires full config system")
+}
+
+func TestAcquirePlatformSerializesInFlightRequests(t *testing.T) {
+	limiter := &PlatformRateLimiter{
+		limiters: map[string]*PlatformLimiter{
+			"test": {
+				inFlight: make(chan struct{}, 1),
+			},
+		},
+	}
+
+	releaseFirst, ok := limiter.AcquirePlatformWithContext(context.Background(), "test")
+	if !ok {
+		t.Fatal("首次请求未获取到平台许可")
+	}
+
+	secondAcquired := make(chan func(), 1)
+	go func() {
+		release, acquired := limiter.AcquirePlatformWithContext(context.Background(), "test")
+		if acquired {
+			secondAcquired <- release
+		}
+	}()
+
+	select {
+	case release := <-secondAcquired:
+		release()
+		t.Fatal("首个请求未释放时，第二个同平台请求不应进入")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	releaseFirst()
+	select {
+	case release := <-secondAcquired:
+		release()
+	case <-time.After(time.Second):
+		t.Fatal("首个请求释放后，第二个请求未获取平台许可")
+	}
+}
+
+func TestEnsurePlatformLimitDoesNotOverrideExplicitLimit(t *testing.T) {
+	limiter := &PlatformRateLimiter{limiters: make(map[string]*PlatformLimiter)}
+	limiter.SetPlatformLimit("test", 5)
+	limiter.EnsurePlatformLimit("test", 1)
+
+	if got := limiter.GetAllPlatformLimits()["test"]; got != 5 {
+		t.Fatalf("兜底限制覆盖了显式配置：得到 %d 秒，期望 5 秒", got)
+	}
 }

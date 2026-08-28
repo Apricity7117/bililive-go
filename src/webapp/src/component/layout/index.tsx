@@ -11,11 +11,15 @@ import {
     MenuFoldOutlined,
     MenuUnfoldOutlined,
     LineChartOutlined,
-    CloudUploadOutlined
+    CloudUploadOutlined,
+    CalendarOutlined,
+    CommentOutlined
 } from '@ant-design/icons';
 import './layout.css';
 
 const { Header, Content, Sider } = Layout;
+// 功能开关：IO 统计（开发中，设为 false 隐藏 UI）
+const ENABLE_IO_STATS_UI = false;
 
 interface Props {
     children?: React.ReactNode;
@@ -116,6 +120,11 @@ class RootLayout extends React.Component<Props, State> {
                                         label: <Link to="/configInfo">设置</Link>,
                                     },
                                     {
+                                        key: 'danmaku',
+                                        icon: <CommentOutlined />,
+                                        label: <Link to="/danmaku">弹幕</Link>,
+                                    },
+                                    {
                                         key: '4',
                                         icon: <FolderOutlined />,
                                         label: <Link to="/fileList">文件</Link>,
@@ -131,10 +140,15 @@ class RootLayout extends React.Component<Props, State> {
                                         label: <Link to="/tasks">任务队列</Link>,
                                     },
                                     {
+                                        key: 'scheduler',
+                                        icon: <CalendarOutlined />,
+                                        label: <a href="/scheduler/" target="_blank" rel="noopener noreferrer">调度器</a>,
+                                    },
+                                    ...(ENABLE_IO_STATS_UI ? [{
                                         key: 'iostats',
                                         icon: <LineChartOutlined />,
                                         label: <Link to="/iostats">IO 统计</Link>,
-                                    },
+                                    }] : []),
                                     {
                                         key: 'update',
                                         icon: <CloudUploadOutlined />,

@@ -14,6 +14,12 @@ import (
 	"github.com/bililive-go/bililive-go/src/pkg/proxy"
 )
 
+// infoRequestTimeout 限制直播间信息及播放地址等元数据请求的总耗时。
+// http.Transport 的 ResponseHeaderTimeout 只覆盖响应头；如果服务端返回响应头后停止发送
+// body，请求仍会永久阻塞。平台级在途限制会在整个 GetInfo 期间持有唯一许可，因此必须用
+// http.Client.Timeout 同时覆盖响应体读取，确保故障请求最终返回并释放许可。
+const infoRequestTimeout = 30 * time.Second
+
 type ByteCounter struct {
 	ReadBytes  int64
 	WriteBytes int64
@@ -263,6 +269,23 @@ func CreateDefaultClient() *http.Client {
 	// 应用信息获取代理（这些客户端主要用于获取直播间信息等 API 请求）
 	proxy.ApplyInfoProxyToTransport(transport)
 
+	return &http.Client{
+		Transport: transport,
+		Timeout:   infoRequestTimeout,
+	}
+}
+
+func CreateDownloadClient() *http.Client {
+	dialer := &net.Dialer{
+		Timeout: 10 * time.Second,
+	}
+
+	transport := newProductionTransport()
+	transport.DialContext = dialer.DialContext
+	transport.DialTLSContext = createTLSDialer(dialer, false, "")
+
+	proxy.ApplyDownloadProxyToTransport(transport)
+
 	return &http.Client{Transport: transport}
 }
 
@@ -293,5 +316,8 @@ func CreateConnCounterClient() (*http.Client, error) {
 	// 应用信息获取代理（这些客户端主要用于获取直播间信息等 API 请求）
 	proxy.ApplyInfoProxyToTransport(transport)
 
-	return &http.Client{Transport: transport}, nil
+	return &http.Client{
+		Transport: transport,
+		Timeout:   infoRequestTimeout,
+	}, nil
 }

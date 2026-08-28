@@ -3,18 +3,55 @@ package douyin
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/bililive-go/bililive-go/src/live"
+	"github.com/bililive-go/bililive-go/src/tools"
 )
 
 var btoolsConsts = struct {
 	port      int
 	authToken string
 }{
-	port:      18110,
-	authToken: "Basic YTph",
+	port:      tools.BToolsPort,
+	authToken: tools.BToolsAuthToken,
+}
+
+// btoolsClient 访问本地 bililive-tools 服务的专用客户端。
+//
+// 不能用 http.DefaultClient：它没有超时，本地服务一旦卡住（而不是报错），
+// 调用方会永久阻塞，直播间轮询 goroutine 会不断堆积。
+// 这里的请求全部打到 127.0.0.1，正常应在毫秒级返回，给 15 秒已经非常宽松。
+var btoolsClient = &http.Client{
+	Timeout: 15 * time.Second,
+}
+
+// doBToolsRequest 向本地 bililive-tools 服务发起一次带鉴权的 GET 请求。
+// 返回的 body 已经读取完毕并关闭，调用方直接解析即可。
+func doBToolsRequest(endpoint string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", btoolsConsts.authToken)
+
+	resp, err := btoolsClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		// 读掉 body 才能让连接回到连接池复用，否则每次失败都会新建一条 TCP 连接，
+		// 大量直播间同时失败时会迅速耗尽本地端口
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("请求失败: %s", resp.Status)
+	}
+
+	return io.ReadAll(resp.Body)
 }
 
 type ChannelInfo struct {
@@ -68,30 +105,12 @@ func (l *btoolsLive) updateChannelInfo() (err error) {
 }
 
 func (l *btoolsLive) fetchChannelInfo() (channelInfo ChannelInfo, err error) {
-	// 使用自定义请求以便添加认证Header
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/bgo/channel-info?url=%s", btoolsConsts.port, url.QueryEscape(l.Url.String()))
-	req, reqErr := http.NewRequest(http.MethodGet, endpoint, nil)
-	if reqErr != nil {
-		err = reqErr
+	body, err := doBToolsRequest(endpoint)
+	if err != nil {
 		return
 	}
-	req.Header.Set("Authorization", btoolsConsts.authToken)
-
-	resp, doErr := http.DefaultClient.Do(req)
-	if doErr != nil {
-		err = doErr
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		err = fmt.Errorf("请求失败: %s", resp.Status)
-		return
-	}
-
-	if err = json.NewDecoder(resp.Body).Decode(&channelInfo); err != nil {
-		return
-	}
+	err = json.Unmarshal(body, &channelInfo)
 	return
 }
 
@@ -104,21 +123,11 @@ func (l *btoolsLive) fetchLiveInfo() (liveInfo liveInfoResp, err error) {
 	}
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/bgo/live-info?platform=douyin&roomId=%s", btoolsConsts.port, url.QueryEscape(l.roomId))
-	req, reqErr := http.NewRequest(http.MethodGet, endpoint, nil)
-	if reqErr != nil {
-		return liveInfo, reqErr
+	body, err := doBToolsRequest(endpoint)
+	if err != nil {
+		return liveInfo, err
 	}
-	req.Header.Set("Authorization", btoolsConsts.authToken)
-
-	resp, doErr := http.DefaultClient.Do(req)
-	if doErr != nil {
-		return liveInfo, doErr
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return liveInfo, fmt.Errorf("请求失败: %s", resp.Status)
-	}
-	if err = json.NewDecoder(resp.Body).Decode(&liveInfo); err != nil {
+	if err = json.Unmarshal(body, &liveInfo); err != nil {
 		return liveInfo, err
 	}
 	return liveInfo, nil
@@ -133,21 +142,11 @@ func (l *btoolsLive) fetchStreamInfo() (streamInfo streamInfoResp, err error) {
 	}
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/bgo/stream-info?platform=douyin&roomId=%s", btoolsConsts.port, url.QueryEscape(l.roomId))
-	req, reqErr := http.NewRequest(http.MethodGet, endpoint, nil)
-	if reqErr != nil {
-		return streamInfo, reqErr
+	body, err := doBToolsRequest(endpoint)
+	if err != nil {
+		return streamInfo, err
 	}
-	req.Header.Set("Authorization", btoolsConsts.authToken)
-
-	resp, doErr := http.DefaultClient.Do(req)
-	if doErr != nil {
-		return streamInfo, doErr
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return streamInfo, fmt.Errorf("请求失败: %s", resp.Status)
-	}
-	if err = json.NewDecoder(resp.Body).Decode(&streamInfo); err != nil {
+	if err = json.Unmarshal(body, &streamInfo); err != nil {
 		return streamInfo, err
 	}
 	return streamInfo, nil

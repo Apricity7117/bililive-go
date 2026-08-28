@@ -181,7 +181,9 @@ test/launcher-config-local.json
 
 # Playwright E2E 测试
 /test-results/
+/test-results-ffmpeg/
 /playwright-report/
+/playwright-report-ffmpeg/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
@@ -189,6 +191,7 @@ test/launcher-config-local.json
 
 # E2E 测试输出（录制文件等）
 /test-output/
+test-output*appdata/
 
 # npm 锁文件（项目统一使用 yarn）
 package-lock.json
@@ -198,3 +201,7 @@ docker-context/bin/*
 !docker-context/bin/.gitkeep
 docker-context/tools/*
 !docker-context/tools/.gitkeep
+
+.trellis
+.vscode
+.gemini

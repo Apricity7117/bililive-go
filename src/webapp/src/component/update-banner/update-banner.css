@@ -1,10 +1,5 @@
-/* 更新横幅样式 */
+/* 更新横幅样式：置于普通文档流中，与 ffmpeg-banner 自然堆叠、不遮挡页面内容 */
 .update-banner {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 1000;
   border-radius: 0;
 }
 

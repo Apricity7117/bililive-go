@@ -116,7 +116,11 @@ func (l *Live) loadCryptoJS() {
 
 	for _, url := range cdnUrls {
 		resp, err = l.RequestSession.Get(url)
-		if err != nil || resp.StatusCode != http.StatusOK {
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
 			continue
 		}
 		body, err = resp.Bytes()
@@ -145,6 +149,12 @@ type Live struct {
 	roomID string
 }
 
+// GetRoomID 返回已解析的数字房间号（由 fetchRoomID 解析）。
+// 如果 URL 本身就是数字房间号，也会在 fetchRoomID 中缓存。
+func (l *Live) GetRoomID() string {
+	return l.roomID
+}
+
 func (l *Live) fetchRoomID() error {
 	if l.roomID != "" {
 		return nil
@@ -154,6 +164,7 @@ func (l *Live) fetchRoomID() error {
 	if err != nil {
 		return errors.New("request failed. error: " + err.Error())
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return errors.New("response code is " + strconv.Itoa(resp.StatusCode))
 	}
@@ -207,6 +218,7 @@ func (l *Live) GetInfo() (info *live.Info, err error) {
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GetInfo() failed, response code: %d", resp.StatusCode)
 	}
@@ -229,6 +241,7 @@ func (l *Live) getSignParams() (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("getSignParams() failed, response code: %d", resp.StatusCode)
 	}
@@ -325,6 +338,7 @@ func (l *Live) GetStreamUrls() (us []*url.URL, err error) {
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, live.ErrInternalError
 	}

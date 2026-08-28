@@ -83,6 +83,10 @@ jobs:
       
       - name: Run E2E tests
         run: npx playwright test
+
+      # FFmpeg 异步下载流程 e2e（独立配置：8085 端口 + mock 下载服务器）
+      - name: Run FFmpeg download E2E tests
+        run: npx playwright test -c playwright.ffmpeg.config.ts
       
       # 写入报告元数据（供 Trace Viewer 使用）
       - name: Write report metadata
@@ -114,6 +118,24 @@ jobs:
           name: test-results
           path: test-results/
           retention-days: 7
+
+      - name: Upload FFmpeg test report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-ffmpeg
+          path: playwright-report-ffmpeg/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload FFmpeg test artifacts
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results-ffmpeg
+          path: test-results-ffmpeg/
+          retention-days: 7
+          if-no-files-found: ignore
       
       # 输出在线报告查看链接
       - name: Print report viewer link

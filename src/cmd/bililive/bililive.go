@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/bluele/gcache"
-	kiratools "github.com/kira1928/remotetools/pkg/tools"
 
 	_ "github.com/bililive-go/bililive-go/src/cmd/bililive/internal"
 	"github.com/bililive-go/bililive-go/src/cmd/bililive/internal/flag"
@@ -34,11 +33,9 @@ import (
 	"github.com/bililive-go/bililive-go/src/pkg/memwatch"
 	"github.com/bililive-go/bililive-go/src/pkg/metadata"
 	"github.com/bililive-go/bililive-go/src/pkg/openlist"
-	"github.com/bililive-go/bililive-go/src/pkg/ratelimit"
 	bilisentryPkg "github.com/bililive-go/bililive-go/src/pkg/sentry"
 	"github.com/bililive-go/bililive-go/src/pkg/telemetry"
 	"github.com/bililive-go/bililive-go/src/pkg/update"
-	"github.com/bililive-go/bililive-go/src/pkg/utils"
 	"github.com/bililive-go/bililive-go/src/recorders"
 	"github.com/bililive-go/bililive-go/src/servers"
 	"github.com/bililive-go/bililive-go/src/tools"
@@ -60,40 +57,78 @@ func getConfig() (*configs.Config, error) {
 		// if config is invalid, try using the config.yml file besides the executable file.
 		config, err := getConfigBesidesExecutable()
 		if err == nil {
-			return config, config.Verify()
+			if vErr := config.Verify(); vErr != nil {
+				return config, vErr
+			}
+			config.StripAllIrrelevantDanmakuFields()
+			return config, nil
 		}
 	}
-	return config, config.Verify()
+	if config.File == "" {
+		paths, pathErr := resolveConfigPathsBesidesExecutable()
+		if pathErr == nil && len(paths) > 0 {
+			config.File = paths[0]
+			if _, statErr := os.Stat(config.File); statErr == nil {
+				fmt.Fprintf(os.Stderr, "[Config] 未指定配置文件，将在首次保存时覆盖现有文件: %s\n", config.File)
+			} else if os.IsNotExist(statErr) {
+				fmt.Fprintf(os.Stderr, "[Config] 未指定配置文件，将在首次保存时创建: %s\n", config.File)
+			} else {
+				fmt.Fprintf(os.Stderr, "[Config] 未指定配置文件，已关联路径但无法检查文件状态 (%s): %v\n", config.File, statErr)
+			}
+		} else if pathErr != nil {
+			fmt.Fprintf(os.Stderr, "[Config] 未指定配置文件且无法确定配置路径，配置变更将仅在内存中生效: %v\n", pathErr)
+		} else {
+			fmt.Fprintln(os.Stderr, "[Config] 未指定配置文件且没有可用的配置路径，配置变更将仅在内存中生效")
+		}
+	}
+	if vErr := config.Verify(); vErr != nil {
+		return config, vErr
+	}
+	config.StripAllIrrelevantDanmakuFields()
+	return config, nil
+}
+
+// resolveConfigPathsBesidesExecutable 推导可执行文件旁的配置文件候选路径。
+//
+// 启动器子进程优先使用启动器入口程序所在目录的配置文件，其次使用当前可执行文件所在目录的配置文件。
+// 返回值按优先级排列；无法定位可执行文件时返回错误。
+func resolveConfigPathsBesidesExecutable() ([]string, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("获取可执行文件路径失败: %w", err)
+	}
+
+	paths := make([]string, 0, 2)
+	if launcherExe := os.Getenv("BILILIVE_LAUNCHER_EXE"); launcherExe != "" {
+		paths = append(paths, filepath.Join(filepath.Dir(launcherExe), "config.yml"))
+	}
+	paths = append(paths, filepath.Join(filepath.Dir(exePath), "config.yml"))
+	return paths, nil
 }
 
 func getConfigBesidesExecutable() (*configs.Config, error) {
-	exePath, err := os.Executable()
+	paths, err := resolveConfigPathsBesidesExecutable()
 	if err != nil {
 		return nil, err
 	}
-
-	// 如果是由 Launcher 启动的子进程（新版本 exe 位于 .appdata/versions/{version}/），
-	// 优先从 Launcher（入口程序）的 exe 旁边查找用户的真实 config.yml。
-	// 因为 release 压缩包解压后，新版本 exe 旁边总会有一个默认的 config.yml，
-	// 必须优先使用用户原始目录的配置文件。
-	if launcherExe := os.Getenv("BILILIVE_LAUNCHER_EXE"); launcherExe != "" {
-		launcherConfigPath := filepath.Join(filepath.Dir(launcherExe), "config.yml")
-		if config, loadErr := configs.NewConfigWithFile(launcherConfigPath); loadErr == nil {
-			fmt.Fprintf(os.Stderr, "[Config] 使用 Launcher 目录的配置文件: %s\n", launcherConfigPath)
+	var lastErr error
+	for index, configPath := range paths {
+		if index > 0 || os.Getenv("BILILIVE_LAUNCHER_EXE") == "" {
+			fmt.Fprintf(os.Stderr, "[Config] 使用当前程序所在目录的配置文件: %s\n", configPath)
+		}
+		config, loadErr := configs.NewConfigWithFile(configPath)
+		if loadErr == nil {
+			if index == 0 && os.Getenv("BILILIVE_LAUNCHER_EXE") != "" {
+				fmt.Fprintf(os.Stderr, "[Config] 使用 Launcher 目录的配置文件: %s\n", configPath)
+			}
 			return config, nil
-		} else {
-			fmt.Fprintf(os.Stderr, "[Config] Launcher 配置文件加载失败 (%s): %v，回退到 exe 目录\n", launcherConfigPath, loadErr)
+		}
+		lastErr = loadErr
+		if index == 0 && os.Getenv("BILILIVE_LAUNCHER_EXE") != "" {
+			fmt.Fprintf(os.Stderr, "[Config] Launcher 配置文件加载失败 (%s): %v，回退到程序所在目录\n", configPath, loadErr)
 		}
 	}
-
-	// 回退：在当前 exe 旁边查找（用户直接双击运行的场景）
-	configPath := filepath.Join(filepath.Dir(exePath), "config.yml")
-	fmt.Fprintf(os.Stderr, "[Config] 使用当前 exe 目录的配置文件: %s\n", configPath)
-	config, err := configs.NewConfigWithFile(configPath)
-	if err != nil {
-		return nil, err
-	}
-	return config, nil
+	return nil, lastErr
 }
 
 // shouldRunAsLauncher 检查是否需要进入 launcher 模式
@@ -273,6 +308,10 @@ func main() {
 	logger.Debugf("%+v", consts.GetAppInfo())
 	logger.Debugf("%+v", configs.GetCurrentConfig())
 
+	// 提前声明信号通道，以便后续 OnShutdownRequest 闭包可以引用它
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+
 	// 初始化更新管理器并尝试连接到启动器（如果由启动器启动）
 	var updateManager *update.Manager
 	if os.Getenv("BILILIVE_LAUNCHER") != "" {
@@ -309,35 +348,19 @@ func main() {
 				logger.Infof("收到启动器关闭请求，优雅期 %d 秒", gracePeriod)
 				// 发送关闭确认
 				updateManager.AckShutdown()
-				// 触发主程序关闭
+				// 触发完整关闭流程（包括 tools.Cleanup），而非仅 rootCancel。
+				// 确保 bililive-tools 等子进程在 Launcher 超时重启时被正确清理，
+				// 避免端口占用导致下次启动失败（issue #1129）。
+				select {
+				case c <- syscall.SIGTERM:
+				default:
+				}
+				// 立即取消 context，确保关闭请求即时生效（即使关闭 goroutine 尚未启动也能中断初始化流程）
 				rootCancel()
 			})
 		}
 	}
 
-	if !utils.IsFFmpegExist(ctx) {
-		hasFoundFfmpeg := false
-		// try to get from remotetools
-		if err = tools.Init(); err == nil {
-			var toolFfmpeg kiratools.Tool
-			if toolFfmpeg, err = tools.Get().GetTool("ffmpeg"); err == nil {
-				if toolFfmpeg.DoesToolExist() {
-					logger.Infof("FFmpeg found from remotetools: %s", toolFfmpeg.GetToolPath())
-					hasFoundFfmpeg = true
-				} else {
-					if err = toolFfmpeg.Install(); err != nil {
-						logger.Fatalln(err.Error() + "\nFFmpeg binary not found and install failed from " + toolFfmpeg.GetInstallSource() + ", Please Check.")
-					} else {
-						logger.Infof("FFmpeg found from remotetools: %s", toolFfmpeg.GetToolPath())
-						hasFoundFfmpeg = true
-					}
-				}
-			}
-		}
-		if !hasFoundFfmpeg {
-			logger.Fatalln("FFmpeg binary not found, Please Check.")
-		}
-	}
 	tools.AsyncInit()
 
 	events.NewDispatcher(ctx)
@@ -346,6 +369,8 @@ func main() {
 
 	// 如果启用了云上传功能，初始化 OpenList 管理器
 	var openlistManager *openlist.Manager
+	// 串行化 OpenList 生命周期操作，防止快速 enable/disable 导致服务泄漏
+	var openlistLifecycleMu sync.Mutex
 	if config.OnRecordFinished.CloudUpload.Enable {
 		// 获取 OpenList 数据目录
 		openlistDataPath := config.OpenList.DataPath
@@ -364,6 +389,9 @@ func main() {
 		bilisentryPkg.Go(func() {
 			if err := openlistManager.Start(rootCtx); err != nil {
 				logger.WithError(err).Error("启动 OpenList 失败，云上传功能将不可用")
+				// 启动失败时清除全局指针（CAS：仅当仍为当前实例时才清除，避免误清新 Manager）
+				openlist.ClearGlobalManagerIf(openlistManager)
+				openlistManager = nil
 			}
 		})
 
@@ -372,6 +400,113 @@ func main() {
 
 		logger.Info("云上传功能已启用")
 	}
+
+	// 注册配置更新回调：当用户通过 Web UI 首次启用云上传时，自动创建并启动 OpenList Manager
+	configs.RegisterAfterUpdate(func(oldCfg, newCfg *configs.Config) {
+		if newCfg == nil {
+			return
+		}
+		wasEnabled := oldCfg != nil && oldCfg.OnRecordFinished.CloudUpload.Enable
+		isEnabled := newCfg.OnRecordFinished.CloudUpload.Enable
+
+		// 关闭云上传：停止 OpenList 进程
+		if wasEnabled && !isEnabled {
+			openlistLifecycleMu.Lock()
+			defer openlistLifecycleMu.Unlock()
+			if mgr := openlist.GetGlobalManager(); mgr != nil {
+				logger.Info("检测到云上传已关闭，正在停止 OpenList...")
+				mgr.Stop()
+				servers.SetOpenListManager(nil)
+				openlistManager = nil
+			}
+			return
+		}
+
+		// 开启云上传：启动 OpenList 进程
+		if wasEnabled || !isEnabled {
+			// 云上传保持启用：检查是否需要重建 Manager（端口或数据目录变更）
+			if wasEnabled && isEnabled {
+				if mgr := openlist.GetGlobalManager(); mgr != nil {
+					// 解析新的配置值
+					newPort := newCfg.OpenList.Port
+					if newPort == 0 {
+						newPort = 5244
+					}
+					newDataPath := newCfg.OpenList.DataPath
+					if newDataPath == "" {
+						newDataPath = filepath.Join(newCfg.AppDataPath, "openlist")
+					}
+					// 与 Manager 当前值比较
+					if mgr.GetPort() != newPort || mgr.GetDataPath() != newDataPath {
+						logger.Infof("检测到 OpenList 配置变更（端口: %d→%d, 数据目录: %s→%s），正在重建 Manager...",
+							mgr.GetPort(), newPort, mgr.GetDataPath(), newDataPath)
+						openlistLifecycleMu.Lock()
+						mgr.Stop()
+						servers.SetOpenListManager(nil)
+						// 创建新 Manager 并启动
+						newMgr := openlist.NewManager(newDataPath, newPort)
+						servers.SetOpenListManager(newMgr)
+						openlistManager = newMgr
+						openlistLifecycleMu.Unlock()
+						bilisentryPkg.Go(func() {
+							if err := newMgr.Start(rootCtx); err != nil {
+								logger.WithError(err).Error("重建 OpenList 失败")
+								openlistLifecycleMu.Lock()
+								// CAS：仅当全局仍为 newMgr 时才清除
+								openlist.ClearGlobalManagerIf(newMgr)
+								openlistManager = nil
+								openlistLifecycleMu.Unlock()
+							}
+						})
+					}
+				}
+			}
+			return
+		}
+
+		openlistLifecycleMu.Lock()
+		// 已有 Manager 则跳过
+		if openlist.GetGlobalManager() != nil {
+			openlistLifecycleMu.Unlock()
+			return
+		}
+
+		logger.Info("检测到云上传已启用，正在初始化 OpenList...")
+
+		openlistDataPath := newCfg.OpenList.DataPath
+		if openlistDataPath == "" {
+			openlistDataPath = filepath.Join(newCfg.AppDataPath, "openlist")
+		}
+		openlistPort := newCfg.OpenList.Port
+		if openlistPort == 0 {
+			openlistPort = 5244
+		}
+
+		mgr := openlist.NewManager(openlistDataPath, openlistPort)
+		// 先设置全局 Manager，让 API 端能立即获取到状态
+		servers.SetOpenListManager(mgr)
+		openlistLifecycleMu.Unlock()
+
+		// 在后台启动 OpenList 进程（需要 rootCtx 生命周期）
+		bilisentryPkg.Go(func() {
+			if err := mgr.Start(rootCtx); err != nil {
+				logger.WithError(err).Error("动态启动 OpenList 失败，云上传功能将不可用")
+				// CAS：仅当全局仍为当前实例时才清除，避免误清新 Manager
+				openlistLifecycleMu.Lock()
+				openlist.ClearGlobalManagerIf(mgr)
+				openlistLifecycleMu.Unlock()
+				return
+			}
+			// Start 完成后复核配置：如果在 waitForReady 期间配置已关闭，立即清理
+			openlistLifecycleMu.Lock()
+			defer openlistLifecycleMu.Unlock()
+			if cfg := configs.GetCurrentConfig(); cfg == nil || !cfg.OnRecordFinished.CloudUpload.Enable {
+				logger.Info("OpenList 启动完成但云上传已关闭，立即停止")
+				mgr.Stop()
+				openlist.ClearGlobalManagerIf(mgr)
+			}
+		})
+	})
 
 	// 初始化 Pipeline 管道管理器
 	pipelineDbPath := filepath.Join(config.AppDataPath, "db", "pipeline.db")
@@ -444,7 +579,20 @@ func main() {
 			servers.StartAutoUpdater(ctx)
 			logger.Info("自动更新检查器已启动")
 		}
+
+		// 注册 FFmpeg 状态变化回调，通过 SSE 推送给前端
+		tools.OnFFmpegStatusChange(func(status tools.FFmpegStatus) {
+			servers.GetSSEHub().BroadcastFFmpegStatus(status)
+		})
 	}
+
+	// 异步检测并（按需）下载 FFmpeg，不阻塞启动流程
+	tools.FFmpegAsyncInit(ctx)
+
+	// 工具链是异步初始化的，WebUI 会先于工具就绪启动。
+	// 注册就绪检查，让依赖外部工具的平台（抖音依赖 bililive-tools）在工具可用之前
+	// 不去请求直播间信息，从而也不会启动录制任务。
+	live.SetPlatformReadinessChecker(tools.PlatformDependenciesReady)
 
 	// 启动 manager
 	if err = lm.Start(ctx); err != nil {
@@ -540,15 +688,6 @@ func main() {
 	// 第一步：立即为所有配置的直播间创建 InitializingLive，让前端可以看到
 	cfg := configs.GetCurrentConfig()
 
-	// 确保所有平台都有最小访问限制（用于控制并行初始化时的请求速度）
-	for _, room := range cfg.LiveRooms {
-		platformKey := configs.GetPlatformKeyFromUrl(room.Url)
-		if platformKey != "" {
-			minInterval := cfg.GetPlatformMinAccessInterval(platformKey)
-			ratelimit.GetGlobalRateLimiter().SetPlatformLimit(platformKey, minInterval)
-		}
-	}
-
 	// 分两批处理：监听中的直播间和非监听的直播间
 	var listeningRooms []live.Live
 	var nonListeningRooms []live.Live
@@ -556,8 +695,11 @@ func main() {
 	// 创建初始化完成的回调函数
 	// 当 InitializingLive.GetInfo() 成功获取真实信息时，会自动调用此回调
 	onInitFinished := func(initializingLive live.Live, originalLive live.Live, info *live.Info) {
-		// 触发 RoomInitializingFinished 事件，让 manager 处理后续逻辑
-		ed.DispatchEvent(events.NewEvent(listeners.RoomInitializingFinished, live.InitializingFinishedParam{
+		// 必须等待旧监听器替换完成后再让 InitializingLive.GetInfo 返回。
+		// 否则旧监听器会先派发 LiveStart，而替换过程又会异步派发 ListenStop 和新的
+		// LiveStart，事件执行顺序不确定，可能出现「新 LiveStart 判断录制器已存在，
+		// 随后旧 ListenStop 又删除录制器」并导致直播中但不再录制。
+		ed.DispatchEventSync(events.NewEvent(listeners.RoomInitializingFinished, live.InitializingFinishedParam{
 			InitializingLive: initializingLive,
 			Live:             originalLive,
 			Info:             info,
@@ -686,16 +828,18 @@ func main() {
 	logger.Infof("Created %d live rooms (%d listening, %d not listening)",
 		inst.Lives.Len(), len(listeningRooms), len(nonListeningRooms))
 
-	c := make(chan os.Signal, 1)
-	// 使用 os.Interrupt 更跨平台，在 Windows 上 SIGHUP 可能不被支持
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	msgChan := c
 
 	// 注册关闭回调，供更新系统在热重启时触发优雅关闭
 	servers.SetShutdownFunc(func() {
-		c <- os.Interrupt
+		select {
+		case c <- os.Interrupt:
+		default:
+		}
 	})
+	shutdownComplete := make(chan struct{})
 	bilisentryPkg.Go(func() {
+		defer close(shutdownComplete)
 		<-msgChan
 		logger.Info("Received shutdown signal, closing...")
 		// 取消根 context，这会导致所有派生的 context 被取消
@@ -711,6 +855,11 @@ func main() {
 		// 关闭 Pipeline 管道管理器
 		if inst.PipelineManager != nil {
 			inst.PipelineManager.Close(ctx)
+		}
+		// 等待异步通知 goroutine（如 Telegram/Email 摘要发送）完成
+		// 必须在 PipelineManager.Close 之后——pipeline 回调可能触发最后的通知
+		if rm, ok := inst.RecorderManager.(recorders.Manager); ok {
+			rm.WaitForNotifications()
 		}
 		// 关闭直播间状态管理器
 		if liveStateManager != nil {
@@ -728,10 +877,21 @@ func main() {
 		}
 		// 停止自动更新器
 		servers.StopAutoUpdater()
+		// 终止所有子进程（bililive-tools 等）并关闭 remotetools WebUI。
+		// 在所有关闭路径下执行，确保端口被释放（issue #1129）。
+		tools.Cleanup()
 		logger.Info("Shutdown complete")
 	})
 
 	inst.WaitGroup.Wait()
+	// WaitGroup 只覆盖 Server、ListenerManager 和 RecorderManager。
+	// 收到关闭请求后还必须等待其余模块和 tools.Cleanup() 完成，避免主程序退出后
+	// Launcher 立即启动新版本，与尚未退出的 bililive-tools 等子进程争用端口。
+	select {
+	case <-rootCtx.Done():
+		<-shutdownComplete
+	default:
+	}
 
 	// 检查是否需要就地切换到 launcher 模式
 	// 如果用户在前端点击了"立即更新"，doApplyUpdate 会设置此标志并触发服务关闭
@@ -742,11 +902,6 @@ func main() {
 	// 这样进程不会退出，Docker 容器不会重启
 	if servers.PendingLauncherTransition() {
 		logger.Infof("====== 版本切换: 所有服务已关闭，正在进入 Launcher 模式 (AppDataPath=%s) ======", configs.GetCurrentConfig().AppDataPath)
-		// 取消根 context，确保日志文件句柄被关闭（避免新版本清理时文件冲突）
-		rootCancel()
-		// 在进入 launcher 模式前，终止所有子进程（btools、klive 等）并关闭 remotetools WebUI
-		// 确保端口被释放，否则新版本 bgo 启动时会遇到 EADDRINUSE
-		tools.Cleanup()
 
 		// 如果当前进程是由父 Launcher 启动的（BILILIVE_LAUNCHER=1），
 		// 不能自己再变成 launcher——否则两个 launcher 会争抢同一个 Named Pipe。

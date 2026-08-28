@@ -83,6 +83,9 @@ func (m *Module) Close(ctx context.Context) {
 	// 等待清理任务结束
 	m.cleanupWg.Wait()
 
+	// 停止请求追踪器（会把缓冲区中剩余的记录写完），必须在关闭存储之前
+	m.tracker.Stop()
+
 	// 关闭存储
 	if err := m.store.Close(); err != nil {
 		logrus.WithError(err).Error("关闭 IO 统计存储失败")

@@ -74,3 +74,28 @@ func TestManagerStartAndClose(t *testing.T) {
 	}
 	m.Close(ctx)
 }
+
+func TestReplaceListenerUsesSynchronousHandoverAndInitialInfo(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	oldListener := NewMockListener(ctrl)
+	oldListener.EXPECT().CloseSync()
+	newListenerMock := NewMockListener(ctrl)
+	info := &live.Info{Status: true}
+	newListenerMock.EXPECT().StartWithInfo(info).Return(nil)
+
+	oldLive := livemock.NewMockLive(ctrl)
+	oldLive.EXPECT().GetLiveId().Return(types.LiveID("old"))
+	newLive := livemock.NewMockLive(ctrl)
+	newLive.EXPECT().GetLiveId().Return(types.LiveID("new")).Times(2)
+
+	m := &manager{savers: map[types.LiveID]Listener{"old": oldListener}}
+	backup := newListener
+	newListener = func(context.Context, live.Live) Listener { return newListenerMock }
+	defer func() { newListener = backup }()
+
+	assert.NoError(t, m.replaceListener(context.Background(), oldLive, newLive, info))
+	assert.Same(t, newListenerMock, m.savers["new"])
+	assert.NotContains(t, m.savers, types.LiveID("old"))
+}

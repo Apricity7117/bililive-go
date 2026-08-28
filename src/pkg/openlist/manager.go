@@ -2,20 +2,57 @@
 package openlist
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/bililive-go/bililive-go/src/configs"
+	bililiveTools "github.com/bililive-go/bililive-go/src/tools"
 	bilisentry "github.com/bililive-go/bililive-go/src/pkg/sentry"
 	"github.com/kira1928/remotetools/pkg/tools"
 	"github.com/kira1928/remotetools/pkg/webui"
 	"github.com/sirupsen/logrus"
 )
+
+// 全局 OpenList 管理器（供 pipeline 等组件使用）
+var (
+	globalManager *Manager
+	globalMu      sync.RWMutex
+)
+
+// SetGlobalManager 设置全局 OpenList 管理器
+func SetGlobalManager(m *Manager) {
+	globalMu.Lock()
+	defer globalMu.Unlock()
+	globalManager = m
+}
+
+// ClearGlobalManagerIf 仅当全局管理器等于 expected 时才清除（CAS 语义）
+// 用于异步清理路径，避免误清已被新实例替换的管理器
+// 返回是否成功清除
+func ClearGlobalManagerIf(expected *Manager) bool {
+	globalMu.Lock()
+	defer globalMu.Unlock()
+	if globalManager == expected {
+		globalManager = nil
+		return true
+	}
+	return false
+}
+
+// GetGlobalManager 获取全局 OpenList 管理器
+func GetGlobalManager() *Manager {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+	return globalManager
+}
 
 // Manager OpenList 进程管理器
 type Manager struct {
@@ -23,6 +60,7 @@ type Manager struct {
 	port        int
 	apiEndpoint string
 	process     *exec.Cmd
+	logFile     *os.File // 日志文件句柄，用于关闭时释放
 
 	mu      sync.Mutex
 	running bool
@@ -50,6 +88,11 @@ func (m *Manager) Start(ctx context.Context) error {
 		return nil
 	}
 
+	// 0. 等待 remotetools 初始化完成
+	if err := bililiveTools.WaitForToolsInit(ctx); err != nil {
+		return fmt.Errorf("等待 remotetools 初始化失败: %w", err)
+	}
+
 	// 1. 获取 remotetools API
 	api := tools.Get()
 	if api == nil {
@@ -75,6 +118,15 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("无法获取 OpenList 可执行文件路径")
 	}
 
+	// 转换为绝对路径（remotetools 返回的可能是相对路径）
+	if !filepath.IsAbs(toolPath) {
+		absPath, err := filepath.Abs(toolPath)
+		if err != nil {
+			return fmt.Errorf("转换绝对路径失败: %w", err)
+		}
+		toolPath = absPath
+	}
+
 	// 4. 确保数据目录存在
 	if err := os.MkdirAll(m.dataPath, 0755); err != nil {
 		return fmt.Errorf("创建数据目录失败: %w", err)
@@ -92,8 +144,11 @@ func (m *Manager) Start(ctx context.Context) error {
 	// 设置输出
 	logFile := filepath.Join(m.dataPath, "openlist.log")
 	if f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+		m.logFile = f
 		m.process.Stdout = f
 		m.process.Stderr = f
+	} else {
+		logrus.WithError(err).Warn("无法打开 OpenList 日志文件")
 	}
 
 	if err := m.process.Start(); err != nil {
@@ -108,14 +163,17 @@ func (m *Manager) Start(ctx context.Context) error {
 		return err
 	}
 
-	// 7. 注册反向代理
+	// 7. 检查是否首次启动，如果是则从日志中读取初始密码并保存到配置
+	m.saveInitialCredentials(logFile)
+
+	// 8. 注册反向代理
 	if err := webui.RegisterToolWebUI("openlist", m.apiEndpoint); err != nil {
 		logrus.WithError(err).Warn("注册 OpenList Web UI 代理失败")
 	}
 
 	logrus.WithField("port", m.port).Info("OpenList 已启动")
 
-	// 8. 监控进程
+	// 9. 监控进程
 	bilisentry.Go(m.watchProcess)
 
 	return nil
@@ -145,6 +203,67 @@ func (m *Manager) waitForReady(ctx context.Context, timeout time.Duration) error
 	return fmt.Errorf("OpenList 服务启动超时")
 }
 
+// saveInitialCredentials 从日志中读取首次启动的初始密码并保存到配置
+func (m *Manager) saveInitialCredentials(logFile string) {
+	config := configs.GetCurrentConfig()
+	if config == nil {
+		return
+	}
+
+	// 如果已经配置了用户名密码，验证有效性
+	if config.OpenList.Username != "" && config.OpenList.Password != "" {
+		// 用现有凭据尝试登录，验证是否有效
+		testClient := NewClient(m.apiEndpoint, "")
+		if _, err := testClient.GetToken(context.Background(), config.OpenList.Username, config.OpenList.Password); err == nil {
+			return // 凭据有效，无需更新
+		}
+		// 凭据无效（如占位值 root/root），继续从日志读取真实密码
+	}
+
+	// 读取日志文件查找初始密码
+	file, err := os.Open(logFile)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	var initialPassword string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, "initial password is:") {
+			// 格式: "Successfully created the admin user and the initial password is: xxx"
+			parts := strings.Split(line, "initial password is:")
+			if len(parts) == 2 {
+				initialPassword = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+
+	if initialPassword == "" {
+		return
+	}
+
+	// 验证密码有效性：日志是追加模式，旧密码可能已被用户修改
+	// 只有实际能登录时才保存
+	client := NewClient(m.apiEndpoint, "")
+	if _, err := client.GetToken(context.Background(), "admin", initialPassword); err != nil {
+		logrus.WithError(err).Debug("初始密码验证失败，跳过保存（可能已被修改）")
+		return
+	}
+
+	// 保存到配置
+	if _, err := configs.UpdateWithRetry(func(c *configs.Config) error {
+		c.OpenList.Username = "admin"
+		c.OpenList.Password = initialPassword
+		return nil
+	}, 3, 10*time.Millisecond); err != nil {
+		logrus.WithError(err).Warn("保存 OpenList 初始密码到配置文件失败")
+	} else {
+		logrus.Info("OpenList 首次启动，初始密码已保存到配置文件")
+	}
+}
+
 // watchProcess 监控进程状态
 func (m *Manager) watchProcess() {
 	if m.process == nil {
@@ -160,10 +279,16 @@ func (m *Manager) watchProcess() {
 
 	select {
 	case <-m.stopCh:
-		// 正常停止
+		// 正常停止（stopInternal 已负责关闭 m.logFile）
 	default:
-		// 异常退出
+		// 异常退出：关闭日志文件句柄，避免 fd 泄漏
 		if wasRunning {
+			m.mu.Lock()
+			if m.logFile != nil {
+				m.logFile.Close()
+				m.logFile = nil
+			}
+			m.mu.Unlock()
 			logrus.WithError(err).Warn("OpenList 进程异常退出")
 		}
 	}
@@ -189,6 +314,12 @@ func (m *Manager) stopInternal() error {
 
 	if m.process != nil && m.process.Process != nil {
 		m.process.Process.Kill()
+	}
+
+	// 关闭日志文件句柄
+	if m.logFile != nil {
+		m.logFile.Close()
+		m.logFile = nil
 	}
 
 	m.running = false
@@ -221,4 +352,36 @@ func (m *Manager) GetPort() int {
 // GetDataPath 获取数据目录
 func (m *Manager) GetDataPath() string {
 	return m.dataPath
+}
+
+// GetClient 获取已认证的 API 客户端
+// 如果提供了 token，直接使用；否则使用用户名密码登录获取 token
+// token 有效性由 withRetry 在实际 API 调用时自动处理（401/403 时自动刷新）
+func (m *Manager) GetClient(ctx context.Context, token, username, password string) (*Client, error) {
+	client := NewClient(m.apiEndpoint, "")
+
+	// 设置凭据（用于 token 自动刷新）
+	if username != "" && password != "" {
+		client.SetCredentials(username, password)
+	}
+
+	// 有 token 时直接使用，不预验证（避免需要管理员权限的 API 调用）
+	// withRetry 会在实际调用遇到 401/403 时自动用密码刷新 token
+	if token != "" {
+		client.SetToken(token)
+		return client, nil
+	}
+
+	// 无 token，使用用户名密码登录
+	if username != "" && password != "" {
+		newToken, err := client.GetToken(ctx, username, password)
+		if err != nil {
+			return nil, fmt.Errorf("OpenList 登录失败: %w", err)
+		}
+		client.SetToken(newToken)
+		return client, nil
+	}
+
+	// 无凭据，返回无 token 的客户端（部分 API 可能不需要认证）
+	return client, nil
 }

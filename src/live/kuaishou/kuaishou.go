@@ -46,6 +46,7 @@ func (l *Live) getData() (*gjson.Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 	switch code := resp.StatusCode; code {
 	case http.StatusOK:
 	case http.StatusNotFound:

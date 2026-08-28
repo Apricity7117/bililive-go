@@ -15,7 +15,8 @@
   "scripts": {
     "report": "node scripts/report-server.js",
     "test:e2e": "npx playwright test",
-    "test:e2e:ui": "npx playwright test --ui"
+    "test:e2e:ui": "npx playwright test --ui",
+    "test:e2e:ffmpeg": "npx playwright test -c playwright.ffmpeg.config.ts"
   },
   "keywords": [],
   "author": "",

@@ -31,12 +31,7 @@ func GetFFmpegPath(ctx context.Context) (string, error) {
 		path = cfg.FfmpegPath
 	}
 	if path != "" {
-		_, err := os.Stat(path)
-		if err == nil {
-			return path, nil
-		} else {
-			return "", err
-		}
+		return validateConfiguredFFmpegPath(path)
 	}
 
 	// try to get from remotetools
@@ -46,12 +41,41 @@ func GetFFmpegPath(ctx context.Context) (string, error) {
 		}
 	}
 
+	return LookupSystemFFmpeg()
+}
+
+// EnvIgnoreSystemFFmpeg 设置该环境变量后跳过系统 PATH 中的 FFmpeg 查找，
+// 强制走 remotetools 下载流程。仅用于 e2e 测试模拟"无 FFmpeg"环境
+// （CI 机器普遍预装 ffmpeg，无法用真实 PATH 构造该场景）。
+const EnvIgnoreSystemFFmpeg = "BILILIVE_IGNORE_SYSTEM_FFMPEG"
+
+// LookupSystemFFmpeg 在系统 PATH 中查找 ffmpeg，找不到时回退查找工作目录下的 ./ffmpeg
+// （允许把 ffmpeg 和主程序放在同一目录）。
+// 注意不能只处理 exec.ErrDot：Unix 下当前目录不在 PATH 中，
+// LookPath 返回 ErrNotFound 而非 ErrDot，因此任何失败都应尝试 ./ffmpeg。
+func LookupSystemFFmpeg() (string, error) {
+	if os.Getenv(EnvIgnoreSystemFFmpeg) != "" {
+		return "", errors.New("system ffmpeg lookup disabled by " + EnvIgnoreSystemFFmpeg)
+	}
 	path, err := exec.LookPath("ffmpeg")
-	if errors.Is(err, exec.ErrDot) {
-		// put ffmpeg.exe and binary like bililive-windows-amd64.exe to the same folder is allowed
+	if err != nil {
 		path, err = exec.LookPath("./ffmpeg")
 	}
 	return path, err
+}
+
+// validateConfiguredFFmpegPath 校验用户显式配置的 ffmpeg_path。
+// 配置路径与自动查找不同：只要用户配置了该路径，实际录制就不会回退到
+// remotetools / 系统 PATH，因此这里必须保证它是可执行文件路径而不是目录。
+func validateConfiguredFFmpegPath(path string) (string, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if fi.IsDir() {
+		return "", fmt.Errorf("ffmpeg_path is a directory: %s", path)
+	}
+	return path, nil
 }
 
 // GetFFmpegPathForLive 获取特定直播间的FFmpeg路径（使用解析后的配置）
@@ -74,12 +98,7 @@ func GetFFmpegPathForLive(ctx context.Context, liveInstance live.Live) (string, 
 	}
 
 	if ffmpegPath != "" {
-		_, err := os.Stat(ffmpegPath)
-		if err == nil {
-			return ffmpegPath, nil
-		} else {
-			return "", err
-		}
+		return validateConfiguredFFmpegPath(ffmpegPath)
 	}
 
 	// 如果没有配置FFmpeg路径，尝试从环境变量或 remotetools 查找

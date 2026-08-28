@@ -54,6 +54,18 @@ func (mr *MockListenerMockRecorder) Close() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockListener)(nil).Close))
 }
 
+// CloseSync mocks base method.
+func (m *MockListener) CloseSync() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "CloseSync")
+}
+
+// CloseSync indicates an expected call of CloseSync.
+func (mr *MockListenerMockRecorder) CloseSync() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CloseSync", reflect.TypeOf((*MockListener)(nil).CloseSync))
+}
+
 // Start mocks base method.
 func (m *MockListener) Start() error {
 	m.ctrl.T.Helper()
@@ -66,6 +78,20 @@ func (m *MockListener) Start() error {
 func (mr *MockListenerMockRecorder) Start() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Start", reflect.TypeOf((*MockListener)(nil).Start))
+}
+
+// StartWithInfo mocks base method.
+func (m *MockListener) StartWithInfo(info *live.Info) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "StartWithInfo", info)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// StartWithInfo indicates an expected call of StartWithInfo.
+func (mr *MockListenerMockRecorder) StartWithInfo(info any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StartWithInfo", reflect.TypeOf((*MockListener)(nil).StartWithInfo), info)
 }
 
 // MockManager is a mock of Manager interface.

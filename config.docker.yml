@@ -8,17 +8,6 @@ app_data_path: /srv/bililive/.appdata
 read_only_tool_folder: /opt/bililive/tools
 feature:
   use_native_flv_parser: false
-danmaku:
-  enable: false
-  save_gift: false
-  use_server_timestamp: true
-  formats:
-    - xml
-update:
-  auto_check: false
-  check_interval_hours: 6
-  auto_download: false
-  include_prerelease: false
 live_rooms:
 
 # 通知服务配置
@@ -50,3 +39,9 @@ notify:
     URL: https://ntfy.sh/xxxx
     token: tk_xxxxxxxxx
     tag: new
+
+update:
+  auto_check: false
+  check_interval_hours: 6
+  auto_download: false
+  include_prerelease: false

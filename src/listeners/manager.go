@@ -56,10 +56,10 @@ func (m *manager) registryListener(ctx context.Context, ed events.Dispatcher) {
 		// 原子地替换 Lives map 中的条目（删除旧 InitializingLive，添加新 wrappedLive）
 		inst.Lives.ReplaceKey(oldLiveId, wrappedLive.GetLiveId(), wrappedLive)
 
-		// 直接将已有的 info 存入缓存，避免再次调用 GetInfo() 触发 API 请求
-		// info.Live 需要更新为新的 wrappedLive，确保后续 JSON 序列化正确
+		// 将已有的 info 注入新的 WrappedLive，避免 listener 交接后立即重复请求平台，
+		// 同时让新调度器从本次成功请求开始计算下一轮间隔。
 		info.Live = wrappedLive
-		if err := inst.Cache.Set(wrappedLive, info); err != nil {
+		if err := wrappedLive.(*live.WrappedLive).SeedInfo(info); err != nil {
 			logger.WithError(err).Warn("failed to cache info for new live")
 		}
 
@@ -73,7 +73,7 @@ func (m *manager) registryListener(ctx context.Context, ed events.Dispatcher) {
 		}
 		configs.SetLiveRoomId(wrappedLive.GetRawUrl(), wrappedLive.GetLiveId())
 		if room.IsListening {
-			if err := m.replaceListener(ctx, initializingLive, wrappedLive); err != nil {
+			if err := m.replaceListener(ctx, initializingLive, wrappedLive, info); err != nil {
 				logger.WithFields(map[string]any{
 					"url": wrappedLive.GetRawUrl(),
 				}).Error(err)
@@ -126,7 +126,7 @@ func (m *manager) RemoveListener(ctx context.Context, liveId types.LiveID) error
 	return nil
 }
 
-func (m *manager) replaceListener(ctx context.Context, oldLive live.Live, newLive live.Live) error {
+func (m *manager) replaceListener(ctx context.Context, oldLive live.Live, newLive live.Live, info *live.Info) error {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	oldLiveId := oldLive.GetLiveId()
@@ -134,7 +134,8 @@ func (m *manager) replaceListener(ctx context.Context, oldLive live.Live, newLiv
 	if !ok {
 		return ErrListenerNotExist
 	}
-	oldListener.Close()
+	// 必须等旧 ListenStop 的录制器清理完成后，才能让新 listener 发布 LiveStart。
+	oldListener.CloseSync()
 	newListener := newListener(ctx, newLive)
 	if oldLiveId == newLive.GetLiveId() {
 		m.savers[oldLiveId] = newListener
@@ -142,7 +143,7 @@ func (m *manager) replaceListener(ctx context.Context, oldLive live.Live, newLiv
 		delete(m.savers, oldLiveId)
 		m.savers[newLive.GetLiveId()] = newListener
 	}
-	return newListener.Start()
+	return newListener.StartWithInfo(info)
 }
 
 func (m *manager) GetListener(ctx context.Context, liveId types.LiveID) (Listener, error) {

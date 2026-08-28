@@ -112,6 +112,7 @@ func (l *Live) getJsonFromBody(htmlBody string) (result *gjson.Result, err error
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, live.ErrRoomNotExist
 	}

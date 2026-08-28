@@ -34,16 +34,28 @@ type BarkResponse struct {
 }
 
 // SendMessage 发送 Bark 开始直播通知
-func SendMessage(serverURL, deviceKey, sound, group, icon, level, hostName, platform, liveURL string) error {
+func SendMessage(serverURL, deviceKey, sound, group, icon, level, hostName, platform, liveURL string, isNotifyOnly ...bool) error {
+	notifyOnly := len(isNotifyOnly) > 0 && isNotifyOnly[0]
 	title := fmt.Sprintf("%s 开始直播", hostName)
-	body := fmt.Sprintf("平台：%s\n正在录制中", platform)
+	var body string
+	if notifyOnly {
+		body = fmt.Sprintf("平台：%s\n已开播,请手动开始录制", platform)
+	} else {
+		body = fmt.Sprintf("平台：%s\n正在录制中", platform)
+	}
 	return sendRequest(serverURL, deviceKey, title, body, sound, group, icon, level, liveURL)
 }
 
 // SendStopMessage 发送 Bark 停止直播通知
-func SendStopMessage(serverURL, deviceKey, sound, group, icon, level, hostName, platform, liveURL string) error {
+func SendStopMessage(serverURL, deviceKey, sound, group, icon, level, hostName, platform, liveURL string, isNotifyOnly ...bool) error {
+	notifyOnly := len(isNotifyOnly) > 0 && isNotifyOnly[0]
 	title := fmt.Sprintf("%s 直播结束", hostName)
-	body := fmt.Sprintf("平台：%s\n录制已停止", platform)
+	var body string
+	if notifyOnly {
+		body = fmt.Sprintf("平台：%s\n已结束直播", platform)
+	} else {
+		body = fmt.Sprintf("平台：%s\n录制已停止", platform)
+	}
 	return sendRequest(serverURL, deviceKey, title, body, sound, group, icon, level, liveURL)
 }
 

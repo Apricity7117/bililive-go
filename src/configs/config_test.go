@@ -4,6 +4,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/bililive-go/bililive-go/src/pkg/ratelimit"
+	"github.com/bililive-go/bililive-go/src/types"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -31,6 +33,7 @@ func TestConfig_Verify(t *testing.T) {
 		RPC:        defaultRPC,
 		Interval:   30,
 		OutPutPath: os.TempDir(),
+		Danmaku:    defaultDanmakuConfig,
 	}
 	assert.NoError(t, cfg.Verify())
 	cfg.Interval = 0
@@ -43,30 +46,33 @@ func TestConfig_Verify(t *testing.T) {
 	assert.Error(t, cfg.Verify())
 }
 
+func TestDefaultUpdateConfig(t *testing.T) {
+	cfg := NewConfig()
+	assert.False(t, cfg.Update.AutoCheck)
+	assert.Equal(t, 6, cfg.Update.CheckIntervalHours)
+	assert.False(t, cfg.Update.AutoDownload)
+	assert.False(t, cfg.Update.IncludePrerelease)
+
+	configured, err := NewConfigWithBytes([]byte(`
+update:
+  auto_check: true
+  auto_download: true
+`))
+	assert.NoError(t, err)
+	assert.True(t, configured.Update.AutoCheck)
+	assert.True(t, configured.Update.AutoDownload)
+}
+
 func TestResolveConfigForRoom(t *testing.T) {
 	cfg := &Config{
 		Interval:   60,
 		OutPutPath: "/global",
 		FfmpegPath: "/usr/bin/ffmpeg",
-		Danmaku: DanmakuRecord{
-			Enable:             false,
-			SaveGift:           false,
-			UseServerTimestamp: true,
-			UseCookie:          true,
-			Formats:            []DanmakuFormat{DanmakuFormatXML},
-		},
 		PlatformConfigs: map[string]PlatformConfig{
 			"douyin": {
 				OverridableConfig: OverridableConfig{
 					Interval:   intPtr(30),
 					OutPutPath: stringPtr("/douyin"),
-					Danmaku: &DanmakuOverride{
-						Enable:             boolPtr(true),
-						SaveGift:           boolPtr(true),
-						UseServerTimestamp: boolPtr(false),
-						UseCookie:          boolPtr(false),
-						Formats:            []DanmakuFormat{DanmakuFormatJSON},
-					},
 				},
 			},
 		},
@@ -87,92 +93,6 @@ func TestResolveConfigForRoom(t *testing.T) {
 	assert.Equal(t, "/douyin", resolved.OutPutPath)
 	// Global value should be used when no override exists
 	assert.Equal(t, "/usr/bin/ffmpeg", resolved.FfmpegPath)
-	assert.True(t, resolved.Danmaku.Enable)
-	assert.True(t, resolved.Danmaku.SaveGift)
-	assert.False(t, resolved.Danmaku.UseServerTimestamp)
-	assert.False(t, resolved.Danmaku.UseCookie)
-	assert.Equal(t, []DanmakuFormat{DanmakuFormatJSON}, resolved.Danmaku.Formats)
-}
-
-func TestDanmakuRecordNormalizeFormats(t *testing.T) {
-	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, DanmakuRecord{Enable: true}.NormalizeFormats())
-	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML, DanmakuFormatJSON}, DanmakuRecord{
-		Enable:  true,
-		Formats: []DanmakuFormat{DanmakuFormatXML, DanmakuFormatJSON, DanmakuFormatXML, "bad"},
-	}.NormalizeFormats())
-}
-
-func TestDanmakuRecordUnmarshalYAMLDefaults(t *testing.T) {
-	cfg, err := NewConfigWithBytes([]byte(`
-rpc:
-  enable: true
-  bind: :8080
-interval: 30
-out_put_path: ./
-danmaku:
-  enable: true
-live_rooms:
-- url: https://live.bilibili.com/123456
-  danmaku:
-    enable: true
-`))
-	assert.NoError(t, err)
-	assert.True(t, cfg.Danmaku.Enable)
-	assert.False(t, cfg.Danmaku.SaveGift)
-	assert.True(t, cfg.Danmaku.UseServerTimestamp)
-	assert.True(t, cfg.Danmaku.UseCookie)
-	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, cfg.Danmaku.Formats)
-	assert.NotNil(t, cfg.LiveRooms[0].Danmaku)
-	assert.NotNil(t, cfg.LiveRooms[0].Danmaku.Enable)
-	assert.True(t, *cfg.LiveRooms[0].Danmaku.Enable)
-	assert.Nil(t, cfg.LiveRooms[0].Danmaku.UseServerTimestamp)
-	assert.Nil(t, cfg.LiveRooms[0].Danmaku.UseCookie)
-	assert.Nil(t, cfg.LiveRooms[0].Danmaku.Formats)
-
-	resolved := cfg.ResolveConfigForRoom(&cfg.LiveRooms[0], "bilibili")
-	assert.True(t, resolved.Danmaku.UseServerTimestamp)
-	assert.True(t, resolved.Danmaku.UseCookie)
-	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, resolved.Danmaku.Formats)
-}
-
-func TestDanmakuOverrideInheritsUnsetFields(t *testing.T) {
-	cfg := &Config{
-		Interval:   60,
-		OutPutPath: "/global",
-		Danmaku: DanmakuRecord{
-			Enable:             false,
-			SaveGift:           true,
-			UseServerTimestamp: true,
-			UseCookie:          true,
-			Formats:            []DanmakuFormat{DanmakuFormatXML},
-		},
-		PlatformConfigs: map[string]PlatformConfig{
-			"bilibili": {
-				OverridableConfig: OverridableConfig{
-					Danmaku: &DanmakuOverride{
-						Enable:    boolPtr(true),
-						UseCookie: boolPtr(false),
-					},
-				},
-			},
-		},
-	}
-
-	room := &LiveRoom{
-		Url: "https://live.bilibili.com/123456",
-		OverridableConfig: OverridableConfig{
-			Danmaku: &DanmakuOverride{
-				SaveGift: boolPtr(false),
-			},
-		},
-	}
-
-	resolved := cfg.ResolveConfigForRoom(room, "bilibili")
-	assert.True(t, resolved.Danmaku.Enable)
-	assert.False(t, resolved.Danmaku.SaveGift)
-	assert.True(t, resolved.Danmaku.UseServerTimestamp)
-	assert.False(t, resolved.Danmaku.UseCookie)
-	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, resolved.Danmaku.Formats)
 }
 
 func TestGetPlatformMinAccessInterval(t *testing.T) {
@@ -194,6 +114,30 @@ func TestGetPlatformMinAccessInterval(t *testing.T) {
 	assert.Equal(t, 1, interval) // 默认最小间隔为 1 秒，防止无限制高频访问
 }
 
+func TestDefaultPlatformRateLimitSurvivesTransientConfigUpdate(t *testing.T) {
+	const roomURL = "https://live.douyin.com/123456"
+	limiter := ratelimit.GetGlobalRateLimiter()
+	t.Cleanup(func() {
+		SetCurrentConfig(NewConfig())
+	})
+
+	cfg := NewConfig()
+	cfg.LiveRooms = []LiveRoom{{Url: roomURL, IsListening: true}}
+	cfg.RefreshLiveRoomIndexCache()
+	SetCurrentConfig(cfg)
+
+	if got := limiter.GetAllPlatformLimits()[PlatformKeyDouyin]; got != 1 {
+		t.Fatalf("初始默认平台限流 = %d 秒，期望 1 秒", got)
+	}
+
+	if _, err := SetLiveRoomId(roomURL, types.LiveID("douyin-test")); err != nil {
+		t.Fatalf("写入临时 LiveId 失败: %v", err)
+	}
+	if got := limiter.GetAllPlatformLimits()[PlatformKeyDouyin]; got != 1 {
+		t.Fatalf("临时配置更新后的默认平台限流 = %d 秒，期望仍为 1 秒", got)
+	}
+}
+
 func TestBackwardsCompatibility(t *testing.T) {
 	// Test that old config files still work
 	oldConfigYaml := `
@@ -213,16 +157,87 @@ live_rooms:
 	assert.Equal(t, 30, cfg.Interval)
 	assert.Len(t, cfg.LiveRooms, 1)
 	assert.Equal(t, "https://live.bilibili.com/123456", cfg.LiveRooms[0].Url)
-	assert.False(t, cfg.Danmaku.Enable)
-	assert.False(t, cfg.Danmaku.SaveGift)
-	assert.True(t, cfg.Danmaku.UseServerTimestamp)
-	assert.True(t, cfg.Danmaku.UseCookie)
-	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, cfg.Danmaku.Formats)
 
 	// Test that resolve works with no overrides
 	resolved := cfg.ResolveConfigForRoom(&cfg.LiveRooms[0], "bilibili")
 	assert.Equal(t, 30, resolved.Interval)
 	assert.Equal(t, "./", resolved.OutPutPath)
+}
+
+func TestDanmakuFormatsMigrationAndValidation(t *testing.T) {
+	withoutFormats, err := NewConfigWithBytes([]byte(`
+danmaku:
+  font_size: 40
+`))
+	assert.NoError(t, err)
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatASS}, withoutFormats.Danmaku.Formats)
+
+	legacy, err := NewConfigWithBytes([]byte(`
+danmaku:
+  enable: true
+  save_gift: false
+`))
+	assert.NoError(t, err)
+	assert.True(t, legacy.DanmakuEnable)
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, legacy.Danmaku.Formats)
+	assert.False(t, *legacy.Danmaku.RecordGift)
+
+	legacyTimestampOnly, err := NewConfigWithBytes([]byte(`
+danmaku:
+  use_server_timestamp: false
+`))
+	assert.NoError(t, err)
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatXML}, legacyTimestampOnly.Danmaku.Formats)
+	assert.False(t, legacyTimestampOnly.Danmaku.ServerTimestampEnabled())
+
+	jsonOnly, err := NewConfigWithBytes([]byte(`
+danmaku:
+  formats: [json]
+`))
+	assert.Error(t, err)
+	assert.Nil(t, jsonOnly)
+
+	empty, err := NewConfigWithBytes([]byte(`
+danmaku:
+  formats: []
+`))
+	assert.ErrorContains(t, err, "至少选择一种")
+	assert.Nil(t, empty)
+
+	unknown, err := NewConfigWithBytes([]byte(`
+danmaku:
+  formats: [yaml]
+`))
+	assert.ErrorContains(t, err, "不支持的格式")
+	assert.Nil(t, unknown)
+}
+
+func TestDanmakuConfigInheritance(t *testing.T) {
+	global := GetDefaultDanmakuConfig()
+	global.Formats = []DanmakuFormat{DanmakuFormatASS}
+	platformFormats := []DanmakuFormat{DanmakuFormatXML}
+	platformCookie := false
+	platformFontSize := 48
+	room := &LiveRoom{Url: "https://live.bilibili.com/123"}
+	room.Danmaku = &DanmakuConfig{Formats: []DanmakuFormat{DanmakuFormatASS}}
+	cfg := &Config{
+		Danmaku: global,
+		PlatformConfigs: map[string]PlatformConfig{
+			"bilibili": {OverridableConfig: OverridableConfig{Danmaku: &DanmakuConfig{
+				Formats: platformFormats, UseCookie: &platformCookie, FontSize: platformFontSize,
+			}}},
+		},
+	}
+
+	resolved := cfg.ResolveConfigForRoom(room, "bilibili")
+	assert.Equal(t, []DanmakuFormat{DanmakuFormatASS}, resolved.Danmaku.Formats)
+	assert.Equal(t, platformFontSize, resolved.Danmaku.FontSize)
+	assert.NotNil(t, resolved.Danmaku.UseCookie)
+	assert.False(t, *resolved.Danmaku.UseCookie)
+
+	room.Danmaku = &DanmakuConfig{}
+	resolved = cfg.ResolveConfigForRoom(room, "bilibili")
+	assert.Equal(t, platformFormats, resolved.Danmaku.Formats)
 }
 
 func TestGetPlatformKeyFromUrl(t *testing.T) {
@@ -234,6 +249,7 @@ func TestGetPlatformKeyFromUrl(t *testing.T) {
 		{"https://live.douyin.com/789", "douyin"},
 		{"https://v.douyin.com/abc", "douyin"},
 		{"https://www.douyu.com/room/123", "douyu"},
+		{"https://play.sooplive.com/mbntv", "sooplive"},
 		{"https://unknown.domain.com/room", "unknown.domain.com"},
 		{"invalid-url", ""},
 	}
@@ -242,6 +258,20 @@ func TestGetPlatformKeyFromUrl(t *testing.T) {
 		result := GetPlatformKeyFromUrl(test.url)
 		assert.Equal(t, test.expected, result, "URL: %s", test.url)
 	}
+}
+
+func TestSetCookieDeletesEmptyCookie(t *testing.T) {
+	cfg := NewConfig()
+	cfg.Cookies = map[string]string{
+		"play.sooplive.com": "SESS=abc",
+	}
+	SetCurrentConfig(cfg)
+
+	newCfg, err := SetCookie("play.sooplive.com", "")
+	assert.NoError(t, err)
+	assert.NotNil(t, newCfg)
+	_, exists := newCfg.Cookies["play.sooplive.com"]
+	assert.False(t, exists)
 }
 
 func TestHierarchicalConfigFromExistingConfig(t *testing.T) {
@@ -353,6 +383,23 @@ func TestBarkConfig_DefaultValues(t *testing.T) {
 	assert.Equal(t, "", cfg.Notify.Bark.Level)
 }
 
+func TestSoopLiveAuth_LoadAndSet(t *testing.T) {
+	cfgYaml := `
+rpc:
+  enable: true
+  bind: :8080
+interval: 20
+out_put_path: ./
+sooplive_auth:
+  username: "tester"
+  password: "secret"
+`
+	cfg, err := NewConfigWithBytes([]byte(cfgYaml))
+	assert.NoError(t, err)
+	assert.Equal(t, "tester", cfg.SoopLiveAuth.Username)
+	assert.Equal(t, "secret", cfg.SoopLiveAuth.Password)
+}
+
 // Helper functions for pointer conversion
 func intPtr(i int) *int {
 	return &i
@@ -360,8 +407,4 @@ func intPtr(i int) *int {
 
 func stringPtr(s string) *string {
 	return &s
-}
-
-func boolPtr(b bool) *bool {
-	return &b
 }

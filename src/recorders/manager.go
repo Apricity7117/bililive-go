@@ -22,11 +22,16 @@ type BroadcastRecorderStatusFunc func(liveId types.LiveID, status map[string]int
 // OnRecordingEndFunc 是录制结束时的回调函数类型
 type OnRecordingEndFunc func(ctx context.Context)
 
+// BroadcastDanmakuFunc 是用于广播弹幕消息的回调函数类型
+type BroadcastDanmakuFunc func(liveId types.LiveID, msgType, username, content string, extra map[string]interface{})
+
 var (
 	// broadcastRecorderStatusFunc 全局广播函数，由 servers 包设置
 	broadcastRecorderStatusFunc BroadcastRecorderStatusFunc
 	// onRecordingEndFunc 录制结束时的回调函数，用于触发优雅更新检查
 	onRecordingEndFunc OnRecordingEndFunc
+	// broadcastDanmakuFunc 全局弹幕广播函数，由 servers 包设置
+	broadcastDanmakuFunc BroadcastDanmakuFunc
 )
 
 // SetBroadcastRecorderStatusFunc 设置录制器状态广播函数
@@ -37,6 +42,11 @@ func SetBroadcastRecorderStatusFunc(fn BroadcastRecorderStatusFunc) {
 // SetOnRecordingEndFunc 设置录制结束回调函数
 func SetOnRecordingEndFunc(fn OnRecordingEndFunc) {
 	onRecordingEndFunc = fn
+}
+
+// SetBroadcastDanmakuFunc 设置弹幕广播函数
+func SetBroadcastDanmakuFunc(fn BroadcastDanmakuFunc) {
+	broadcastDanmakuFunc = fn
 }
 
 func NewManager(ctx context.Context) Manager {
@@ -63,6 +73,8 @@ type Manager interface {
 	GetRecorderStatus(ctx context.Context, liveId types.LiveID) (map[string]interface{}, error)
 	// GetActiveRecordingsCount 获取当前活跃的录制数量
 	GetActiveRecordingsCount() int
+	// WaitForNotifications 等待所有异步通知 goroutine 完成（关闭流程中使用）
+	WaitForNotifications()
 }
 
 // for test
@@ -76,6 +88,7 @@ type manager struct {
 	statusTicker *time.Ticker
 	statusStopCh chan struct{}
 	statusWg     sync.WaitGroup // 用于等待广播 goroutine 退出
+	notifyWg     sync.WaitGroup // 跟踪异步通知 goroutine（sendAccumulatedSummary），关闭时等待
 	// restartingCount 追踪正在执行 CloseForRestart 的旧 recorder 数量。
 	// RestartRecorder 在释放锁后才执行 oldRecorder.CloseForRestart()，
 	// 此期间 map 中只有新 recorder，但旧 recorder 仍在收尾运行。
@@ -88,6 +101,15 @@ type manager struct {
 func (m *manager) registryListener(ctx context.Context, ed events.Dispatcher) {
 	ed.AddEventListener(listeners.LiveStart, events.NewEventListener(func(event *events.Event) {
 		live := event.Object.(live.Live)
+
+		// 如果房间配置为仅提醒模式，跳过自动录制
+		if cfg := configs.GetCurrentConfig(); cfg != nil {
+			if room, err := cfg.GetLiveRoomByUrl(live.GetRawUrl()); err == nil && room.NotifyOnly {
+				live.GetLogger().Info("Room is notify-only, skipping auto-recording")
+				return
+			}
+		}
+
 		if err := m.AddRecorder(ctx, live); err != nil {
 			live.GetLogger().Errorf("failed to add recorder, err: %v", err)
 		}
@@ -150,6 +172,12 @@ func (m *manager) Close(ctx context.Context) {
 	inst.WaitGroup.Done()
 }
 
+// WaitForNotifications 等待所有异步通知 goroutine 完成
+// 应在 PipelineManager.Close 之后调用，确保所有 pipeline 回调触发的通知已完成
+func (m *manager) WaitForNotifications() {
+	m.notifyWg.Wait()
+}
+
 func (m *manager) AddRecorder(ctx context.Context, live live.Live) error {
 	m.lock.Lock()
 	defer m.lock.Unlock()
@@ -161,11 +189,15 @@ func (m *manager) addRecorderLocked(ctx context.Context, live live.Live) error {
 	if _, ok := m.savers[live.GetLiveId()]; ok {
 		return ErrRecorderExist
 	}
-	recorder, err := newRecorder(ctx, live)
+	rec, err := newRecorder(ctx, live)
 	if err != nil {
 		return err
 	}
-	m.savers[live.GetLiveId()] = recorder
+	// 设置通知 WaitGroup，使异步摘要发送 goroutine 可被关闭流程等待
+	if recTyped, ok := rec.(*recorder); ok {
+		recTyped.notifyWg = &m.notifyWg
+	}
+	m.savers[live.GetLiveId()] = rec
 
 	cfg := configs.GetCurrentConfig()
 	if cfg != nil {
@@ -173,12 +205,12 @@ func (m *manager) addRecorderLocked(ctx context.Context, live live.Live) error {
 			bilisentry.GoWithContext(ctx, func(ctx context.Context) { m.cronRestart(ctx, live) })
 		}
 	}
-	if err := recorder.Start(ctx); err != nil {
+	if err := rec.Start(ctx); err != nil {
 		// Start 失败时从 map 删除并异步 Close 新 recorder，防止泄漏/僵尸实例
 		// 使用异步 Close 避免在持锁时执行耗时操作（如等待 ffmpeg 进程退出），
 		// 防止长时间阻塞其他 manager 操作
 		delete(m.savers, live.GetLiveId())
-		bilisentry.Go(recorder.Close)
+		bilisentry.Go(rec.Close)
 		return err
 	}
 	return nil
@@ -222,6 +254,11 @@ func (m *manager) RestartRecorder(ctx context.Context, live live.Live) error {
 		return err
 	}
 	newRec := m.savers[live.GetLiveId()]
+	// 设置分段重启摘要屏障：阻止新 recorder 在 Pipeline 状态转移前发送摘要
+	if newRecTyped, ok := newRec.(*recorder); ok {
+		newRecTyped.transferWg = &sync.WaitGroup{}
+		newRecTyped.transferWg.Add(1)
+	}
 	// restartingCount 必须在释放锁之前递增，否则 Unlock 到 Add(1) 之间
 	// LiveEnd 可能移除新 recorder 并看到 restartingCount==0，
 	// 导致 GetActiveRecordingsCount() 误判为"无活跃录制"触发优雅更新
@@ -253,6 +290,15 @@ func (m *manager) RestartRecorder(ctx context.Context, live live.Live) error {
 		} else {
 			live.GetLogger().Warnf("分段重启时新 recorder 已被移除，跳过 %d 个历史文件传递", len(oldFiles))
 		}
+	}
+
+	// 4. 转移 Pipeline 状态（确保旧分段的 Pipeline 结果不丢失）
+	if newRecTyped, ok := newRec.(*recorder); ok {
+		if oldRecTyped, ok := oldRecorder.(*recorder); ok {
+			newRecTyped.TransferPipelineState(oldRecTyped)
+		}
+		// 释放摘要屏障：转移已完成（或无需转移），允许新 recorder 发送摘要
+		newRecTyped.transferWg.Done()
 	}
 
 	return nil

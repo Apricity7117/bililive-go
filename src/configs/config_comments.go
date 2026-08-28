@@ -32,29 +32,6 @@ func DecorateConfigNode(node *yaml.Node) {
 # 负数为非法值，程序会输出 log 提醒，并无视所设定的数值`, "")
 	}
 
-	finishNode := findNode(root, "on_record_finished")
-	if finishNode != nil {
-		setFieldComment(finishNode, "custom_commandline",
-			`#  当 custom_commandline 的值 不为空时，convert_to_mp4 的值会被无视，
-#  而是在录制结束后直接执行 custom_commandline 中的命令。
-#  在 custom_commandline 执行结束后，程序还会继续查看 delete_flv_after_convert 的值，
-#  来判断是否需要删除原始 flv 文件。
-#  以下是一个在录制结束后将 flv 视频转换为同名 mp4 视频的示例：
-#  custom_commandline: '{{ .Ffmpeg }} -hide_banner -i "{{ .FileName }}" -c copy "{{ .FileName | trimSuffix (.FileName | ext)}}.mp4"'`, "")
-	}
-
-	setFieldHeadComment(root, "danmaku", "# 弹幕录制配置（当前支持 B 站和抖音直播间）")
-	danmakuNode := findNode(root, "danmaku")
-	if danmakuNode != nil {
-		setFieldComment(danmakuNode, "enable", "# 是否录制弹幕，关闭时不会连接弹幕服务器", "")
-		setFieldComment(danmakuNode, "save_gift", "# 是否保存礼物和上舰事件", "")
-		setFieldComment(danmakuNode, "use_server_timestamp", "# 是否优先使用弹幕服务器返回的时间戳", "")
-		setFieldComment(danmakuNode, "use_cookie", "# 弹幕连接时是否使用已配置的 Cookie", "")
-		setFieldComment(danmakuNode, "formats",
-			`# 弹幕输出格式，可同时配置多个：xml、json
-# 例如: [xml] 或 [xml, json]`, "")
-	}
-
 	setFieldHeadComment(root, "notify", "# 通知服务配置")
 	notifyNode := findNode(root, "notify")
 	if notifyNode != nil {

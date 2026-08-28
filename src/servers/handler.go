@@ -19,6 +19,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/hr3lxphr6j/requests"
 	"github.com/tidwall/gjson"
@@ -29,11 +30,14 @@ import (
 	"github.com/bililive-go/bililive-go/src/instance"
 	"github.com/bililive-go/bililive-go/src/listeners"
 	"github.com/bililive-go/bililive-go/src/live"
+	soop "github.com/bililive-go/bililive-go/src/live/sooplive"
 	"github.com/bililive-go/bililive-go/src/livestate"
 	applog "github.com/bililive-go/bililive-go/src/log"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
 	"github.com/bililive-go/bililive-go/src/pkg/memstats"
+	"github.com/bililive-go/bililive-go/src/pkg/metadata"
 	"github.com/bililive-go/bililive-go/src/pkg/ratelimit"
+	"github.com/bililive-go/bililive-go/src/pkg/sidecar"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
 	"github.com/bililive-go/bililive-go/src/recorders"
 	"github.com/bililive-go/bililive-go/src/tools"
@@ -86,6 +90,15 @@ func parseInfo(ctx context.Context, l live.Live) *live.Info {
 	if info.RoomName == "" {
 		info.RoomName = l.GetRawUrl()
 	}
+
+	// 设置 NotifyOnly 状态
+	info.NotifyOnly = false
+	if cfg := configs.GetCurrentConfig(); cfg != nil {
+		if room, err := cfg.GetLiveRoomByUrl(l.GetRawUrl()); err == nil {
+			info.NotifyOnly = room.NotifyOnly
+		}
+	}
+
 	return info
 }
 
@@ -668,8 +681,9 @@ func addLives(writer http.ResponseWriter, r *http.Request) {
 	inst := instance.GetInstance(r.Context())
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeJSON(writer, map[string]any{
-			"error": err.Error(),
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{
+			ErrNo:  http.StatusBadRequest,
+			ErrMsg: err.Error(),
 		})
 		return
 	}
@@ -677,8 +691,9 @@ func addLives(writer http.ResponseWriter, r *http.Request) {
 	errorMessages := make([]string, 0, 4)
 	gjson.ParseBytes(b).ForEach(func(key, value gjson.Result) bool {
 		isListen := value.Get("listen").Bool()
+		notifyOnly := value.Get("notify_only").Bool()
 		urlStr := strings.Trim(value.Get("url").String(), " ")
-		if retInfo, err := addLiveImpl(inst.Ctx, urlStr, isListen); err != nil {
+		if retInfo, err := addLiveImpl(inst.Ctx, urlStr, isListen, notifyOnly, true); err != nil {
 			msg := urlStr + ": " + err.Error()
 			applog.GetLogger().Error(msg)
 			errorMessages = append(errorMessages, msg)
@@ -689,11 +704,10 @@ func addLives(writer http.ResponseWriter, r *http.Request) {
 		return true
 	})
 	sort.Sort(info)
-	// TODO return error messages too
 	writeJSON(writer, info)
 }
 
-func addLiveImpl(ctx context.Context, urlStr string, isListen bool) (info *live.Info, err error) {
+func addLiveImpl(ctx context.Context, urlStr string, isListen bool, notifyOnly bool, persist bool) (info *live.Info, err error) {
 	if !strings.HasPrefix(urlStr, "http://") && !strings.HasPrefix(urlStr, "https://") {
 		urlStr = "https://" + urlStr
 	}
@@ -708,6 +722,7 @@ func addLiveImpl(ctx context.Context, urlStr string, isListen bool) (info *live.
 		liveRoom = &configs.LiveRoom{
 			Url:         u.String(),
 			IsListening: isListen,
+			NotifyOnly:  notifyOnly,
 		}
 		needAppend = true
 	}
@@ -715,31 +730,169 @@ func addLiveImpl(ctx context.Context, urlStr string, isListen bool) (info *live.
 	if err != nil {
 		return nil, err
 	}
+	if !inst.Lives.SetIfAbsent(newLive.GetLiveId(), newLive) {
+		return nil, errors.New("直播间已存在")
+	}
 	// 记录 LiveId 到全局配置（并发安全）
 	configs.SetLiveRoomId(u.String(), newLive.GetLiveId())
-	if inst.Lives.SetIfAbsent(newLive.GetLiveId(), newLive) {
-		if isListen {
-			inst.ListenerManager.(listeners.Manager).AddListener(ctx, newLive)
+	// 先将房间写入配置，再启动 Listener，确保 sendLiveNotification 能读到 NotifyOnly 等字段
+	if needAppend {
+		if liveRoom == nil {
+			return nil, errors.New("liveRoom is nil, cannot append to LiveRooms")
 		}
-		info = parseInfo(ctx, newLive)
-
-		if needAppend {
-			if liveRoom == nil {
-				return nil, errors.New("liveRoom is nil, cannot append to LiveRooms")
-			}
-			// 使用统一的 Update 接口做 COW 并原子替换
+		if persist {
 			if _, err := configs.AppendLiveRoom(*liveRoom); err != nil {
 				return nil, err
 			}
+		} else {
+			if _, err := configs.AppendLiveRoomTransient(*liveRoom); err != nil {
+				return nil, err
+			}
 		}
-		// 广播直播间列表变更事件
-		GetSSEHub().BroadcastListChange(newLive.GetLiveId(), "room_added", map[string]interface{}{
-			"live_id":   string(newLive.GetLiveId()),
-			"url":       urlStr,
-			"listening": isListen,
-		})
 	}
+	if isListen {
+		inst.ListenerManager.(listeners.Manager).AddListener(ctx, newLive)
+	}
+	info = parseInfo(ctx, newLive)
+	// 广播直播间列表变更事件
+	GetSSEHub().BroadcastListChange(newLive.GetLiveId(), "room_added", map[string]interface{}{
+		"live_id":   string(newLive.GetLiveId()),
+		"url":       urlStr,
+		"listening": isListen,
+	})
 	return info, nil
+}
+
+func batchAddLives(writer http.ResponseWriter, r *http.Request) {
+	inst := instance.GetInstance(r.Context())
+	b, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{
+			ErrNo:  http.StatusBadRequest,
+			ErrMsg: "failed to read request body",
+		})
+		return
+	}
+
+	var req batchAddRequest
+	if err := json.Unmarshal(b, &req); err != nil {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{
+			ErrNo:  http.StatusBadRequest,
+			ErrMsg: "invalid request body",
+		})
+		return
+	}
+
+	// 过滤空 URL，只保留有效条目
+	validURLs := make([]string, 0, len(req.URLs))
+	for _, u := range req.URLs {
+		if s := strings.TrimSpace(u); s != "" {
+			validURLs = append(validURLs, s)
+		}
+	}
+
+	if len(validURLs) == 0 {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{
+			ErrNo:  http.StatusBadRequest,
+			ErrMsg: "urls is empty",
+		})
+		return
+	}
+
+	const maxBatchSize = 50
+	if len(validURLs) > maxBatchSize {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{
+			ErrNo:  http.StatusBadRequest,
+			ErrMsg: fmt.Sprintf("too many urls: %d (max %d)", len(validURLs), maxBatchSize),
+		})
+		return
+	}
+
+	// 使用客户端提供的 batch_id，或生成新的
+	batchID := req.BatchID
+	if batchID == "" {
+		batchID = "batch_" + uuid.New().String()
+	}
+
+	// 立即返回 batch_id 和有效总数
+	writeJSON(writer, batchAddResponse{
+		BatchID: batchID,
+		Total:   len(validURLs),
+	})
+
+	// 异步处理批量添加
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				applog.GetLogger().Errorf("batch add: panic recovered: %v", r)
+				GetSSEHub().BroadcastBatchComplete(batchID, batchCompleteEvent{
+					Total:        len(validURLs),
+					SuccessCount: 0,
+					FailCount:    len(validURLs),
+					Timestamp:    time.Now(),
+				})
+			}
+		}()
+		hub := GetSSEHub()
+		successCount := 0
+		failCount := 0
+
+		for i, urlStr := range validURLs {
+			// 检查重复房间，避免调用 addLiveImpl 做无用的网络请求
+			checkURL := urlStr
+			if !strings.HasPrefix(checkURL, "http://") && !strings.HasPrefix(checkURL, "https://") {
+				checkURL = "https://" + checkURL
+			}
+			if u, err := url.Parse(checkURL); err == nil {
+				if _, err := configs.GetCurrentConfig().GetLiveRoomByUrl(u.String()); err == nil {
+					event := batchProgressEvent{
+						Index:   i,
+						Total:   len(validURLs),
+						URL:     urlStr,
+						Success: false,
+						Error:   "直播间已存在",
+					}
+					failCount++
+					hub.BroadcastBatchProgress(batchID, event)
+					continue
+				}
+			}
+
+			retInfo, err := addLiveImpl(inst.Ctx, urlStr, req.Listen, req.NotifyOnly, false)
+			event := batchProgressEvent{
+				Index:   i,
+				Total:   len(validURLs),
+				URL:     urlStr,
+				Success: err == nil,
+			}
+			if err != nil {
+				event.Error = err.Error()
+				failCount++
+			} else {
+				event.Info = retInfo
+				successCount++
+			}
+
+			hub.BroadcastBatchProgress(batchID, event)
+		}
+
+		// 批量完成后统一持久化一次配置
+		var persistErr string
+		if successCount > 0 {
+			if err := configs.Persist(); err != nil {
+				persistErr = err.Error()
+				applog.GetLogger().Errorf("batch add: failed to persist config: %v", err)
+			}
+		}
+
+		hub.BroadcastBatchComplete(batchID, batchCompleteEvent{
+			Total:        len(validURLs),
+			SuccessCount: successCount,
+			FailCount:    failCount,
+			PersistError: persistErr,
+			Timestamp:    time.Now(),
+		})
+	}()
 }
 
 func removeLive(writer http.ResponseWriter, r *http.Request) {
@@ -792,7 +945,15 @@ func getConfig(writer http.ResponseWriter, r *http.Request) {
 func putConfig(writer http.ResponseWriter, r *http.Request) {
 	config := configs.GetCurrentConfig()
 	config.RefreshLiveRoomIndexCache()
+	if config.File == "" {
+		writeJsonWithStatusCode(writer, http.StatusOK, commonResp{
+			ErrMsg: "当前运行未关联配置文件，设置仅在内存中生效，重启后将丢失；请使用 -c 指定配置文件",
+			Data:   "OK",
+		})
+		return
+	}
 	if err := config.Marshal(); err != nil {
+		applog.GetLogger().Errorf("保存配置文件失败 (%s): %v", config.File, err)
 		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{
 			ErrNo:  http.StatusBadRequest,
 			ErrMsg: err.Error(),
@@ -878,7 +1039,7 @@ func applyLiveRoomsByConfig(ctx context.Context, oldConfig *configs.Config, newC
 		newUrlMap[newRoom.Url] = newRoom
 		if room, err := oldConfig.GetLiveRoomByUrl(newRoom.Url); err != nil {
 			// add live
-			if _, err := addLiveImpl(ctx, newRoom.Url, newRoom.IsListening); err != nil {
+			if _, err := addLiveImpl(ctx, newRoom.Url, newRoom.IsListening, newRoom.NotifyOnly, true); err != nil {
 				return err
 			}
 		} else {
@@ -1046,14 +1207,25 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 			platformKey = "unknown"
 		}
 
+		// 计算 LiveId（从 URL 生成，与 live/internal/genLiveId 逻辑一致）
+		var liveId string
+		if room.LiveId != "" {
+			liveId = string(room.LiveId)
+		} else if parsedUrl, err := url.Parse(room.Url); err == nil {
+			liveId = string(types.LiveID(utils.GetMd5String([]byte(parsedUrl.Host + parsedUrl.Path))))
+		}
+
 		roomInfo := map[string]interface{}{
 			"url":          room.Url,
 			"is_listening": room.IsListening,
 			"quality":      room.Quality,
 			"audio_only":   room.AudioOnly,
 			"nick_name":    room.NickName,
-			"live_id":      string(room.LiveId),
-			"danmaku":      room.Danmaku,
+			"live_id":      liveId,
+			"room_config": map[string]interface{}{
+				"danmaku_enable": room.DanmakuEnable,
+				"danmaku":        room.Danmaku,
+			},
 		}
 
 		// 从缓存获取直播间信息（不触发网络请求）
@@ -1077,7 +1249,7 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 	allKnownPlatforms := []string{
 		"bilibili", "douyin", "douyu", "huya", "kuaishou", "yy", "acfun",
 		"lang", "missevan", "openrec", "weibolive", "xiaohongshu", "yizhibo",
-		"hongdoufm", "zhanqi", "cc", "twitch", "qq", "huajiao",
+		"hongdoufm", "zhanqi", "cc", "twitch", "qq", "huajiao", "sooplive",
 	}
 
 	// 构建平台统计响应
@@ -1126,7 +1298,6 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 			"warning_message":         warningMessage,
 			"out_put_path":            platformConfig.OutPutPath,
 			"ffmpeg_path":             platformConfig.FfmpegPath,
-			"danmaku":                 platformConfig.Danmaku,
 		})
 		processedPlatforms[platformKey] = true
 	}
@@ -1153,7 +1324,6 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 			"has_rooms":              true,
 			"effective_interval":     cfg.Interval,
 			"actual_access_interval": actualAccessInterval,
-			"danmaku":                nil,
 		})
 		processedPlatforms[platformKey] = true
 	}
@@ -1175,7 +1345,6 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 			"interval":                platformConfig.Interval,
 			"out_put_path":            platformConfig.OutPutPath,
 			"ffmpeg_path":             platformConfig.FfmpegPath,
-			"danmaku":                 platformConfig.Danmaku,
 		})
 		processedPlatforms[platformKey] = true
 	}
@@ -1363,107 +1532,27 @@ func updateConfig(writer http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func applyDanmakuRecordUpdates(target *configs.DanmakuRecord, updates map[string]interface{}) {
-	if enable, ok := updates["enable"].(bool); ok {
-		target.Enable = enable
+// parseDanmakuFormats 解析 API 中的格式数组，并保留显式空数组以便后续校验。
+func parseDanmakuFormats(value interface{}) ([]configs.DanmakuFormat, bool) {
+	if value == nil {
+		return nil, false
 	}
-	if saveGift, ok := updates["save_gift"].(bool); ok {
-		target.SaveGift = saveGift
-	}
-	if saveGift, ok := updates["saveGift"].(bool); ok {
-		target.SaveGift = saveGift
-	}
-	if useServerTimestamp, ok := updates["use_server_timestamp"].(bool); ok {
-		target.UseServerTimestamp = useServerTimestamp
-	}
-	if useServerTimestamp, ok := updates["useServerTimestamp"].(bool); ok {
-		target.UseServerTimestamp = useServerTimestamp
-	}
-	if useCookie, ok := updates["use_cookie"].(bool); ok {
-		target.UseCookie = useCookie
-	}
-	if useCookie, ok := updates["useCookie"].(bool); ok {
-		target.UseCookie = useCookie
-	}
-	if rawFormats, ok := updates["formats"].([]interface{}); ok {
-		formats := make([]configs.DanmakuFormat, 0, len(rawFormats))
-		for _, raw := range rawFormats {
-			if format, ok := raw.(string); ok {
-				formats = append(formats, configs.DanmakuFormat(format))
+	result := make([]configs.DanmakuFormat, 0)
+	switch values := value.(type) {
+	case []interface{}:
+		for _, item := range values {
+			if text, ok := item.(string); ok {
+				result = append(result, configs.DanmakuFormat(strings.ToLower(strings.TrimSpace(text))))
 			}
 		}
-		target.Formats = formats
-	} else if rawFormat, ok := updates["format"].(string); ok {
-		// 兼容单格式写法，便于手写 JSON 或后续前端逐步迁移。
-		target.Formats = []configs.DanmakuFormat{configs.DanmakuFormat(rawFormat)}
-	}
-}
-
-func applyDanmakuOverrideUpdates(target *configs.DanmakuOverride, updates map[string]interface{}) {
-	if raw, exists := updates["enable"]; exists {
-		if raw == nil {
-			target.Enable = nil
-		} else if enable, ok := raw.(bool); ok {
-			target.Enable = &enable
+	case []string:
+		for _, text := range values {
+			result = append(result, configs.DanmakuFormat(strings.ToLower(strings.TrimSpace(text))))
 		}
+	default:
+		return nil, false
 	}
-	if raw, exists := updates["save_gift"]; exists {
-		if raw == nil {
-			target.SaveGift = nil
-		} else if saveGift, ok := raw.(bool); ok {
-			target.SaveGift = &saveGift
-		}
-	}
-	if raw, exists := updates["saveGift"]; exists {
-		if raw == nil {
-			target.SaveGift = nil
-		} else if saveGift, ok := raw.(bool); ok {
-			target.SaveGift = &saveGift
-		}
-	}
-	if raw, exists := updates["use_server_timestamp"]; exists {
-		if raw == nil {
-			target.UseServerTimestamp = nil
-		} else if useServerTimestamp, ok := raw.(bool); ok {
-			target.UseServerTimestamp = &useServerTimestamp
-		}
-	}
-	if raw, exists := updates["useServerTimestamp"]; exists {
-		if raw == nil {
-			target.UseServerTimestamp = nil
-		} else if useServerTimestamp, ok := raw.(bool); ok {
-			target.UseServerTimestamp = &useServerTimestamp
-		}
-	}
-	if raw, exists := updates["use_cookie"]; exists {
-		if raw == nil {
-			target.UseCookie = nil
-		} else if useCookie, ok := raw.(bool); ok {
-			target.UseCookie = &useCookie
-		}
-	}
-	if raw, exists := updates["useCookie"]; exists {
-		if raw == nil {
-			target.UseCookie = nil
-		} else if useCookie, ok := raw.(bool); ok {
-			target.UseCookie = &useCookie
-		}
-	}
-	if raw, exists := updates["formats"]; exists {
-		if raw == nil {
-			target.Formats = nil
-		} else if rawFormats, ok := raw.([]interface{}); ok {
-			formats := make([]configs.DanmakuFormat, 0, len(rawFormats))
-			for _, item := range rawFormats {
-				if format, ok := item.(string); ok {
-					formats = append(formats, configs.DanmakuFormat(format))
-				}
-			}
-			target.Formats = formats
-		}
-	} else if rawFormat, ok := updates["format"].(string); ok {
-		target.Formats = []configs.DanmakuFormat{configs.DanmakuFormat(rawFormat)}
-	}
+	return result, true
 }
 
 // applyConfigUpdates 将更新应用到配置
@@ -1505,6 +1594,83 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 	}
 	if toolRootFolder, ok := updates["tool_root_folder"].(string); ok {
 		c.ToolRootFolder = toolRootFolder
+	}
+	if danmakuEnable, ok := updates["danmaku_enable"].(bool); ok {
+		c.DanmakuEnable = danmakuEnable
+	}
+	if danmaku, ok := updates["danmaku"].(map[string]interface{}); ok {
+		if formats, present := parseDanmakuFormats(danmaku["formats"]); present {
+			c.Danmaku.Formats = formats
+		}
+		if useServerTimestamp, present := danmaku["use_server_timestamp"].(bool); present {
+			c.Danmaku.UseServerTimestamp = configs.BoolPtr(useServerTimestamp)
+		}
+		if useCookie, present := danmaku["use_cookie"].(bool); present {
+			c.Danmaku.UseCookie = configs.BoolPtr(useCookie)
+		}
+		if fontSize, ok := danmaku["font_size"].(float64); ok {
+			c.Danmaku.FontSize = int(fontSize)
+		}
+		if fontName, ok := danmaku["font_name"].(string); ok {
+			c.Danmaku.FontName = fontName
+		}
+		if displayMode, ok := danmaku["scroll_area"].(string); ok {
+			c.Danmaku.ScrollArea = displayMode
+		}
+		if scrollTime, ok := danmaku["scroll_time"].(float64); ok {
+			c.Danmaku.ScrollTime = int(scrollTime)
+		}
+		if resolution, ok := danmaku["resolution"].(string); ok {
+			c.Danmaku.Resolution = resolution
+		}
+		if outline, ok := danmaku["outline"].(float64); ok {
+			c.Danmaku.Outline = configs.IntPtr(int(outline))
+		}
+		if opacity, ok := danmaku["opacity"].(float64); ok {
+			c.Danmaku.Opacity = configs.IntPtr(int(opacity))
+		}
+		if recordGift, ok := danmaku["record_gift"].(bool); ok {
+			c.Danmaku.RecordGift = configs.BoolPtr(recordGift)
+		} else if _, exists := danmaku["record_gift"]; exists && danmaku["record_gift"] == nil {
+			c.Danmaku.RecordGift = nil
+		}
+		if recordDouyuGift, ok := danmaku["record_douyu_gift"].(bool); ok {
+			c.Danmaku.RecordDouyuGift = configs.BoolPtr(recordDouyuGift)
+		} else if _, exists := danmaku["record_douyu_gift"]; exists && danmaku["record_douyu_gift"] == nil {
+			c.Danmaku.RecordDouyuGift = nil
+		}
+		if recordDouyinGift, ok := danmaku["record_douyin_gift"].(bool); ok {
+			c.Danmaku.RecordDouyinGift = configs.BoolPtr(recordDouyinGift)
+		} else if _, exists := danmaku["record_douyin_gift"]; exists && danmaku["record_douyin_gift"] == nil {
+			c.Danmaku.RecordDouyinGift = nil
+		}
+		if recordGuard, ok := danmaku["record_guard"].(bool); ok {
+			c.Danmaku.RecordGuard = configs.BoolPtr(recordGuard)
+		} else if _, exists := danmaku["record_guard"]; exists && danmaku["record_guard"] == nil {
+			c.Danmaku.RecordGuard = nil
+		}
+		if recordSuperChat, ok := danmaku["record_super_chat"].(bool); ok {
+			c.Danmaku.RecordSuperChat = configs.BoolPtr(recordSuperChat)
+		} else if _, exists := danmaku["record_super_chat"]; exists && danmaku["record_super_chat"] == nil {
+			c.Danmaku.RecordSuperChat = nil
+		}
+		if guardPosition, ok := danmaku["guard_position"].(string); ok {
+			c.Danmaku.GuardPosition = guardPosition
+		}
+		if scPosition, ok := danmaku["sc_position"].(string); ok {
+			c.Danmaku.ScPosition = scPosition
+		}
+		if err := c.Danmaku.Validate(); err != nil {
+			return fmt.Errorf("弹幕参数无效: %w", err)
+		}
+	}
+	if soopAuth, ok := updates["sooplive_auth"].(map[string]interface{}); ok {
+		if username, ok := soopAuth["username"].(string); ok {
+			c.SoopLiveAuth.Username = username
+		}
+		if password, ok := soopAuth["password"].(string); ok {
+			c.SoopLiveAuth.Password = password
+		}
 	}
 
 	// 处理日志配置
@@ -1567,11 +1733,49 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 		if fixFlv, ok := orf["fix_flv_at_first"].(bool); ok {
 			c.OnRecordFinished.FixFlvAtFirst = fixFlv
 		}
-	}
-
-	// 处理弹幕录制配置
-	if danmaku, ok := updates["danmaku"].(map[string]interface{}); ok {
-		applyDanmakuRecordUpdates(&c.Danmaku, danmaku)
+		if burnSubtitles, ok := orf["burn_subtitles"].(bool); ok {
+			c.OnRecordFinished.BurnSubtitles = burnSubtitles
+		}
+		if codec, ok := orf["burn_subtitles_codec"].(string); ok {
+			c.OnRecordFinished.BurnSubtitlesCodec = codec
+		}
+		if crf, ok := orf["burn_subtitles_crf"].(string); ok {
+			c.OnRecordFinished.BurnSubtitlesCrf = crf
+		}
+		if preset, ok := orf["burn_subtitles_preset"].(string); ok {
+			c.OnRecordFinished.BurnSubtitlesPreset = preset
+		}
+		if deleteAss, ok := orf["burn_delete_ass"].(bool); ok {
+			c.OnRecordFinished.BurnDeleteAss = deleteAss
+		}
+		if deleteSource, ok := orf["burn_delete_source"].(bool); ok {
+			c.OnRecordFinished.BurnDeleteSource = deleteSource
+		}
+		// 处理云上传配置
+		if cloudUpload, ok := orf["cloud_upload"].(map[string]interface{}); ok {
+			if enable, ok := cloudUpload["enable"].(bool); ok {
+				c.OnRecordFinished.CloudUpload.Enable = enable
+			}
+			if storageName, ok := cloudUpload["storage_name"].(string); ok {
+				c.OnRecordFinished.CloudUpload.StorageName = storageName
+			}
+			if uploadPathTmpl, ok := cloudUpload["upload_path_tmpl"].(string); ok {
+				c.OnRecordFinished.CloudUpload.UploadPathTmpl = uploadPathTmpl
+			}
+			if deleteAfter, ok := cloudUpload["delete_after_upload"].(bool); ok {
+				c.OnRecordFinished.CloudUpload.DeleteAfterUpload = deleteAfter
+			}
+			if deleteAllAfter, ok := cloudUpload["delete_all_after_upload"].(bool); ok {
+				c.OnRecordFinished.CloudUpload.DeleteAllAfterUpload = deleteAllAfter
+			}
+			if uploadSubtitles, ok := cloudUpload["upload_subtitles"].(bool); ok {
+				c.OnRecordFinished.CloudUpload.UploadSubtitles = uploadSubtitles
+			}
+		}
+		// 处理上传时机
+		if uploadTiming, ok := orf["upload_timing"].(string); ok {
+			c.OnRecordFinished.UploadTiming = configs.UploadTiming(uploadTiming)
+		}
 	}
 
 	// 处理通知配置
@@ -1636,6 +1840,23 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 				c.Notify.Bark.Level = level
 			}
 		}
+		if wxpusherCfg, ok := notify["wxpusher"].(map[string]interface{}); ok {
+			if enable, ok := wxpusherCfg["enable"].(bool); ok {
+				c.Notify.WxPusher.Enable = enable
+			}
+			if appToken, ok := wxpusherCfg["appToken"].(string); ok {
+				c.Notify.WxPusher.AppToken = appToken
+			}
+			if uids, ok := wxpusherCfg["uids"].([]interface{}); ok {
+				uidList := make([]string, 0, len(uids))
+				for _, uid := range uids {
+					if uidStr, ok := uid.(string); ok && uidStr != "" {
+						uidList = append(uidList, uidStr)
+					}
+				}
+				c.Notify.WxPusher.UIDs = uidList
+			}
+		}
 	}
 
 	// 处理代理配置
@@ -1695,6 +1916,25 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 		}
 	}
 
+	// 处理 OpenList 配置
+	if openlistCfg, ok := updates["openlist"].(map[string]interface{}); ok {
+		if port, ok := openlistCfg["port"].(float64); ok {
+			c.OpenList.Port = int(port)
+		}
+		if dataPath, ok := openlistCfg["data_path"].(string); ok {
+			c.OpenList.DataPath = dataPath
+		}
+		if username, ok := openlistCfg["username"].(string); ok {
+			c.OpenList.Username = username
+		}
+		if password, ok := openlistCfg["password"].(string); ok {
+			c.OpenList.Password = password
+		}
+		if token, ok := openlistCfg["token"].(string); ok {
+			c.OpenList.Token = token
+		}
+	}
+
 	return nil
 }
 
@@ -1737,6 +1977,14 @@ func updatePlatformConfig(writer http.ResponseWriter, r *http.Request) {
 		}
 		// 使用助手函数更新可覆盖配置
 		applyOverridableConfigUpdates(&pc.OverridableConfig, updates)
+
+		// 验证弹幕配置有效性
+		if pc.Danmaku != nil {
+			candidate := *pc.Danmaku
+			if err := candidate.ValidateWithPlatform(platformKey); err != nil {
+				return fmt.Errorf("弹幕参数无效: %w", err)
+			}
+		}
 
 		c.PlatformConfigs[platformKey] = pc
 		return nil
@@ -1803,13 +2051,29 @@ func updateRoomConfigById(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 记录更新前的 NotifyOnly 状态，用于判断是否需要自动开始录制
+	var wasNotifyOnly bool
+	inst := instance.GetInstance(r.Context())
+
 	_, err = configs.UpdateWithRetry(func(c *configs.Config) error {
-		// 查找直播间
+		// 查找直播间（先按 LiveId，回退按 URL 计算的 hash）
 		roomIdx := -1
 		for i, room := range c.LiveRooms {
 			if string(room.LiveId) == liveId {
 				roomIdx = i
 				break
+			}
+		}
+		// LiveId 可能未初始化（yaml:"-"），回退按 URL 计算 hash 匹配
+		if roomIdx == -1 {
+			for i, room := range c.LiveRooms {
+				if parsedUrl, err := url.Parse(room.Url); err == nil {
+					computedId := string(types.LiveID(utils.GetMd5String([]byte(parsedUrl.Host + parsedUrl.Path))))
+					if computedId == liveId {
+						roomIdx = i
+						break
+					}
+				}
 			}
 		}
 
@@ -1818,6 +2082,9 @@ func updateRoomConfigById(writer http.ResponseWriter, r *http.Request) {
 		}
 
 		room := &c.LiveRooms[roomIdx]
+
+		// 保存更新前的 NotifyOnly 状态
+		wasNotifyOnly = room.NotifyOnly
 
 		// 更新直播间特有字段
 		if url, ok := updates["url"].(string); ok {
@@ -1832,12 +2099,24 @@ func updateRoomConfigById(writer http.ResponseWriter, r *http.Request) {
 		if audioOnly, ok := updates["audio_only"].(bool); ok {
 			room.AudioOnly = audioOnly
 		}
+		if notifyOnly, ok := updates["notify_only"].(bool); ok {
+			room.NotifyOnly = notifyOnly
+		}
 		if nickName, ok := updates["nick_name"].(string); ok {
 			room.NickName = nickName
 		}
 
 		// 更新可覆盖配置
 		applyOverridableConfigUpdates(&room.OverridableConfig, updates)
+
+		// 验证弹幕配置有效性（同时根据平台清理不适用的字段）
+		if room.Danmaku != nil {
+			platformKey := configs.GetPlatformKeyFromUrl(room.Url)
+			candidate := *room.Danmaku
+			if err := candidate.ValidateWithPlatform(platformKey); err != nil {
+				return fmt.Errorf("弹幕参数无效: %w", err)
+			}
+		}
 
 		return nil
 	}, 3, 10*time.Millisecond)
@@ -1848,6 +2127,35 @@ func updateRoomConfigById(writer http.ResponseWriter, r *http.Request) {
 			ErrMsg: "更新直播间配置失败: " + err.Error(),
 		})
 		return
+	}
+
+	// 如果从 NotifyOnly 切换为普通模式，检查是否正在直播并自动开始录制
+	if notifyOnly, ok := updates["notify_only"].(bool); ok {
+		if wasNotifyOnly && !notifyOnly {
+			// 检查是否正在直播（通过缓存）
+			liveObj, ok := inst.Lives.Get(types.LiveID(liveId))
+			if ok {
+				if obj, err := inst.Cache.Get(liveObj); err == nil && obj != nil {
+					liveInfo := obj.(*live.Info)
+					if liveInfo.Status {
+						// 正在直播，检查是否已经在录制
+						recorderMgr, ok := inst.RecorderManager.(recorders.Manager)
+						if ok && !recorderMgr.HasRecorder(inst.Ctx, liveObj.GetLiveId()) {
+							// 未在录制，自动开始录制
+							if err := recorderMgr.AddRecorder(inst.Ctx, liveObj); err != nil {
+								liveObj.GetLogger().Errorf("自动开始录制失败: %v", err)
+							} else {
+								liveObj.GetLogger().Info("从仅提醒模式切换为普通模式，自动开始录制")
+								// 广播录制开始事件
+								GetSSEHub().BroadcastListChange(liveObj.GetLiveId(), "record_start", map[string]interface{}{
+									"live_id": string(liveObj.GetLiveId()),
+								})
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	writeJSON(writer, commonResp{
@@ -1885,19 +2193,6 @@ func applyOverridableConfigUpdates(oc *configs.OverridableConfig, updates map[st
 	if timeoutSec, ok := updates["timeout_in_seconds"].(float64); ok {
 		val := int(timeoutSec * 1000000)
 		oc.TimeoutInUs = &val
-	}
-	if rawDanmaku, exists := updates["danmaku"]; exists {
-		if rawDanmaku == nil {
-			oc.Danmaku = nil
-		} else if danmaku, ok := rawDanmaku.(map[string]interface{}); ok {
-			if oc.Danmaku == nil {
-				oc.Danmaku = &configs.DanmakuOverride{}
-			}
-			applyDanmakuOverrideUpdates(oc.Danmaku, danmaku)
-			if oc.Danmaku.IsEmpty() {
-				oc.Danmaku = nil
-			}
-		}
 	}
 
 	// 处理 feature 配置（包括 downloader_type）
@@ -1963,6 +2258,86 @@ func applyOverridableConfigUpdates(oc *configs.OverridableConfig, updates map[st
 			oc.StreamPreference = nil
 		}
 	}
+
+	// 处理 danmaku_enable 配置
+	if danmakuEnable, ok := updates["danmaku_enable"].(bool); ok {
+		oc.DanmakuEnable = &danmakuEnable
+	} else if _, exists := updates["danmaku_enable"]; exists && updates["danmaku_enable"] == nil {
+		// 显式 null → 清除覆盖，恢复继承
+		oc.DanmakuEnable = nil
+	}
+
+	// 处理 danmaku 弹幕参数配置
+	if danmaku, ok := updates["danmaku"].(map[string]interface{}); ok {
+		if oc.Danmaku == nil {
+			// 使用空覆盖对象保留三级继承；缺失字段由最终解析配置提供默认值。
+			oc.Danmaku = &configs.DanmakuConfig{}
+		}
+		if formats, present := parseDanmakuFormats(danmaku["formats"]); present {
+			oc.Danmaku.Formats = formats
+		}
+		if useServerTimestamp, present := danmaku["use_server_timestamp"].(bool); present {
+			oc.Danmaku.UseServerTimestamp = configs.BoolPtr(useServerTimestamp)
+		}
+		if useCookie, present := danmaku["use_cookie"].(bool); present {
+			oc.Danmaku.UseCookie = configs.BoolPtr(useCookie)
+		}
+		if fontSize, ok := danmaku["font_size"].(float64); ok {
+			oc.Danmaku.FontSize = int(fontSize)
+		}
+		if fontName, ok := danmaku["font_name"].(string); ok {
+			oc.Danmaku.FontName = fontName
+		}
+		if scrollArea, ok := danmaku["scroll_area"].(string); ok {
+			oc.Danmaku.ScrollArea = scrollArea
+		}
+		if scrollTime, ok := danmaku["scroll_time"].(float64); ok {
+			oc.Danmaku.ScrollTime = int(scrollTime)
+		}
+		if resolution, ok := danmaku["resolution"].(string); ok {
+			oc.Danmaku.Resolution = resolution
+		}
+		if outline, ok := danmaku["outline"].(float64); ok {
+			oc.Danmaku.Outline = configs.IntPtr(int(outline))
+		}
+		if opacity, ok := danmaku["opacity"].(float64); ok {
+			oc.Danmaku.Opacity = configs.IntPtr(int(opacity))
+		}
+		if recordGift, ok := danmaku["record_gift"].(bool); ok {
+			oc.Danmaku.RecordGift = configs.BoolPtr(recordGift)
+		} else if _, exists := danmaku["record_gift"]; exists && danmaku["record_gift"] == nil {
+			oc.Danmaku.RecordGift = nil
+		}
+		if recordDouyuGift, ok := danmaku["record_douyu_gift"].(bool); ok {
+			oc.Danmaku.RecordDouyuGift = configs.BoolPtr(recordDouyuGift)
+		} else if _, exists := danmaku["record_douyu_gift"]; exists && danmaku["record_douyu_gift"] == nil {
+			oc.Danmaku.RecordDouyuGift = nil
+		}
+		if recordDouyinGift, ok := danmaku["record_douyin_gift"].(bool); ok {
+			oc.Danmaku.RecordDouyinGift = configs.BoolPtr(recordDouyinGift)
+		} else if _, exists := danmaku["record_douyin_gift"]; exists && danmaku["record_douyin_gift"] == nil {
+			oc.Danmaku.RecordDouyinGift = nil
+		}
+		if recordGuard, ok := danmaku["record_guard"].(bool); ok {
+			oc.Danmaku.RecordGuard = configs.BoolPtr(recordGuard)
+		} else if _, exists := danmaku["record_guard"]; exists && danmaku["record_guard"] == nil {
+			oc.Danmaku.RecordGuard = nil
+		}
+		if recordSuperChat, ok := danmaku["record_super_chat"].(bool); ok {
+			oc.Danmaku.RecordSuperChat = configs.BoolPtr(recordSuperChat)
+		} else if _, exists := danmaku["record_super_chat"]; exists && danmaku["record_super_chat"] == nil {
+			oc.Danmaku.RecordSuperChat = nil
+		}
+		if guardPosition, ok := danmaku["guard_position"].(string); ok {
+			oc.Danmaku.GuardPosition = guardPosition
+		}
+		if scPosition, ok := danmaku["sc_position"].(string); ok {
+			oc.Danmaku.ScPosition = scPosition
+		}
+	} else if _, exists := updates["danmaku"]; exists && updates["danmaku"] == nil {
+		// 显式 null → 清除覆盖，恢复继承
+		oc.Danmaku = nil
+	}
 }
 
 // updateRoomConfig 更新直播间配置
@@ -2011,25 +2386,22 @@ func updateRoomConfig(writer http.ResponseWriter, r *http.Request) {
 		if audioOnly, ok := updates["audio_only"].(bool); ok {
 			room.AudioOnly = audioOnly
 		}
+		if notifyOnly, ok := updates["notify_only"].(bool); ok {
+			room.NotifyOnly = notifyOnly
+		}
 		if nickName, ok := updates["nick_name"].(string); ok {
 			room.NickName = nickName
 		}
-		if interval, ok := updates["interval"].(float64); ok {
-			val := int(interval)
-			room.Interval = &val
-		}
-		if outPutPath, ok := updates["out_put_path"].(string); ok {
-			if outPutPath == "" {
-				room.OutPutPath = nil
-			} else {
-				room.OutPutPath = &outPutPath
-			}
-		}
-		if ffmpegPath, ok := updates["ffmpeg_path"].(string); ok {
-			if ffmpegPath == "" {
-				room.FfmpegPath = nil
-			} else {
-				room.FfmpegPath = &ffmpegPath
+
+		// 处理可覆盖配置（弹幕、interval、outPutPath、ffmpegPath 等）
+		applyOverridableConfigUpdates(&room.OverridableConfig, updates)
+
+		// 验证弹幕配置（同时根据平台清理不适用的字段）
+		if room.Danmaku != nil {
+			platformKey := configs.GetPlatformKeyFromUrl(decodedUrl)
+			candidate := *room.Danmaku
+			if err := candidate.ValidateWithPlatform(platformKey); err != nil {
+				return fmt.Errorf("弹幕配置无效: %w", err)
 			}
 		}
 
@@ -2098,33 +2470,108 @@ func getFileInfo(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	type jsonFile struct {
-		IsFolder     bool   `json:"is_folder"`
-		Name         string `json:"name"`
-		LastModified int64  `json:"last_modified"`
-		Size         int64  `json:"size"`
+		IsFolder     bool     `json:"is_folder"`
+		Name         string   `json:"name"`
+		LastModified int64    `json:"last_modified"`
+		Size         int64    `json:"size"`
+		SubtitleFile string   `json:"subtitle_file,omitempty"`
+		DanmakuFiles []string `json:"danmaku_files,omitempty"`
+		Uploaded     bool     `json:"uploaded,omitempty"`
 	}
-	jsonFiles := make([]jsonFile, len(files))
-	json := struct {
-		Files []jsonFile `json:"files"`
-		Path  string     `json:"path"`
-	}{
-		Path: path,
+
+	// First pass: separate ASS/XML files and build base-name -> sidecars map.
+	danmakuFiles := make(map[string][]string)
+	type fileEntry struct {
+		dir  os.DirEntry
+		info os.FileInfo
 	}
-	for i, file := range files {
+	var validFiles []fileEntry
+	for _, file := range files {
 		info, err := file.Info()
 		if err != nil {
 			continue
 		}
-		jsonFiles[i].IsFolder = file.IsDir()
-		jsonFiles[i].Name = file.Name()
-		jsonFiles[i].LastModified = info.ModTime().Unix()
-		if !file.IsDir() {
-			jsonFiles[i].Size = info.Size()
+		name := file.Name()
+		if !file.IsDir() && (strings.HasSuffix(strings.ToLower(name), ".ass") || strings.HasSuffix(strings.ToLower(name), ".xml")) {
+			baseName := strings.TrimSuffix(name, filepath.Ext(name))
+			danmakuFiles[baseName] = append(danmakuFiles[baseName], name)
+		} else {
+			validFiles = append(validFiles, fileEntry{dir: file, info: info})
 		}
 	}
-	json.Files = jsonFiles
+
+	// Second pass: build response, attaching subtitle info to video files
+	jsonFiles := make([]jsonFile, 0, len(validFiles))
+	for _, fe := range validFiles {
+		jf := jsonFile{
+			IsFolder:     fe.dir.IsDir(),
+			Name:         fe.dir.Name(),
+			LastModified: fe.info.ModTime().Unix(),
+		}
+		if !fe.dir.IsDir() {
+			jf.Size = fe.info.Size()
+			// 关联弹幕文件：ASS 继续填充旧字段，ASS/XML 全量填充新数组。
+			baseName := fe.dir.Name()
+			if idx := strings.LastIndex(baseName, "."); idx > 0 {
+				baseName = baseName[:idx]
+			}
+			associatedBases := []string{baseName}
+			if idx := strings.LastIndex(baseName, "_PART"); idx > 0 {
+				rootBase := baseName[:idx]
+				if sidecar.IsPartBase(baseName, rootBase) {
+					associatedBases = append(associatedBases, rootBase)
+				}
+			}
+			for _, associatedBase := range associatedBases {
+				for _, danmakuFile := range danmakuFiles[associatedBase] {
+					jf.DanmakuFiles = append(jf.DanmakuFiles, danmakuFile)
+					if strings.EqualFold(filepath.Ext(danmakuFile), ".ass") {
+						jf.SubtitleFile = danmakuFile
+					}
+				}
+			}
+			// Check if this file has been uploaded to cloud
+			relPath := fe.dir.Name()
+			if path != "" {
+				relPath = path + "/" + fe.dir.Name() // key 统一用正斜杠
+			}
+			if val, err := metadata.GetStore().Get(r.Context(), metadata.NamespaceUploaded, relPath); err == nil && val != "" {
+				jf.Uploaded = true
+			}
+		}
+		jsonFiles = append(jsonFiles, jf)
+	}
+
+	json := struct {
+		Files []jsonFile `json:"files"`
+		Path  string     `json:"path"`
+	}{
+		Files: jsonFiles,
+		Path:  path,
+	}
 
 	writeJSON(writer, json)
+}
+
+// syncDanmakuSidecars 同步重命名视频关联的 ASS/XML 弹幕文件。
+func syncDanmakuSidecars(oldBase, newBase string) {
+	for _, ext := range []string{".ass", ".xml"} {
+		oldPath := oldBase + ext
+		if _, err := os.Stat(oldPath); err == nil {
+			_ = os.Rename(oldPath, newBase+ext)
+		}
+	}
+}
+
+func isVideoFilePath(filePath string) bool {
+	return sidecar.IsVideo(filePath)
+}
+
+// removeDanmakuSidecars 删除视频关联的 ASS/XML 弹幕文件，PART 视频同时处理根侧车。
+func removeDanmakuSidecars(videoPath string) {
+	for _, path := range sidecar.SidecarPaths(videoPath) {
+		_ = os.Remove(path)
+	}
 }
 
 // translateOSError 将系统错误转换为中文，兼容多平台。
@@ -2220,6 +2667,37 @@ func renameFile(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 同步重命名关联的 ASS/XML 弹幕文件
+	if !info.IsDir() && isVideoFilePath(oldAbsPath) {
+		oldBase := strings.TrimSuffix(oldAbsPath, filepath.Ext(oldAbsPath))
+		newBase := strings.TrimSuffix(newAbsPath, filepath.Ext(newAbsPath))
+		syncDanmakuSidecars(oldBase, newBase)
+	}
+
+	// 迁移上传标记（key 统一用正斜杠）
+	oldRel := path
+	newRelPath, _ := filepath.Rel(base, newAbsPath)
+	newRel := filepath.ToSlash(newRelPath)
+	if info.IsDir() {
+		// 目录重命名：迁移该目录下所有文件的上传标记
+		allMarks, _ := metadata.GetStore().GetAll(r.Context(), metadata.NamespaceUploaded)
+		oldPrefix := oldRel + "/"
+		for key, val := range allMarks {
+			if strings.HasPrefix(key, oldPrefix) {
+				suffix := key[len(oldPrefix):]
+				newKey := newRel + "/" + suffix
+				metadata.GetStore().Set(r.Context(), metadata.NamespaceUploaded, newKey, val)
+				metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, key)
+			}
+		}
+	} else {
+		// 文件重命名：迁移单个上传标记
+		if val, err := metadata.GetStore().Get(r.Context(), metadata.NamespaceUploaded, oldRel); err == nil {
+			metadata.GetStore().Set(r.Context(), metadata.NamespaceUploaded, newRel, val)
+			metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, oldRel)
+		}
+	}
+
 	writeJSON(writer, commonResp{Data: "OK"})
 }
 
@@ -2239,9 +2717,34 @@ func deleteFile(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 记录是否为目录（删除前检查）
+	isDir := false
+	if info, err := os.Stat(absPath); err == nil {
+		isDir = info.IsDir()
+	}
+
+	// 删除关联的 ASS/XML 弹幕文件
+	if !isDir && isVideoFilePath(absPath) {
+		removeDanmakuSidecars(absPath)
+	}
+
 	if err := os.RemoveAll(absPath); err != nil {
 		writeJSON(writer, commonResp{ErrNo: 500, ErrMsg: "删除失败: " + translateOSError(err)})
 		return
+	}
+
+	// 清除上传标记
+	if isDir {
+		// 目录：清除该目录下所有文件的上传标记
+		allMarks, _ := metadata.GetStore().GetAll(r.Context(), metadata.NamespaceUploaded)
+		prefix := path + "/" // key 统一用正斜杠
+		for key := range allMarks {
+			if strings.HasPrefix(key, prefix) {
+				metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, key)
+			}
+		}
+	} else {
+		metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, path)
 	}
 
 	writeJSON(writer, commonResp{Data: "OK"})
@@ -2320,6 +2823,34 @@ func batchRenameFiles(writer http.ResponseWriter, r *http.Request) {
 			results = append(results, Result{Path: path, Success: false, Message: translateOSError(err)})
 		} else {
 			results = append(results, Result{Path: path, Success: true, Message: "成功"})
+			// 同步重命名关联的 ASS/XML 弹幕文件
+			if !info.IsDir() && isVideoFilePath(oldAbsPath) {
+				oldBase := strings.TrimSuffix(oldAbsPath, filepath.Ext(oldAbsPath))
+				newBase := strings.TrimSuffix(newAbsPath, filepath.Ext(newAbsPath))
+				syncDanmakuSidecars(oldBase, newBase)
+			}
+
+			// 迁移上传标记（key 统一用正斜杠）
+			oldRel := path
+			newRelPath, _ := filepath.Rel(base, newAbsPath)
+			newRel := filepath.ToSlash(newRelPath)
+			if info.IsDir() {
+				allMarks, _ := metadata.GetStore().GetAll(r.Context(), metadata.NamespaceUploaded)
+				oldPrefix := oldRel + "/"
+				for key, val := range allMarks {
+					if strings.HasPrefix(key, oldPrefix) {
+						suffix := key[len(oldPrefix):]
+						newKey := newRel + "/" + suffix
+						metadata.GetStore().Set(r.Context(), metadata.NamespaceUploaded, newKey, val)
+						metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, key)
+					}
+				}
+			} else {
+				if val, err := metadata.GetStore().Get(r.Context(), metadata.NamespaceUploaded, oldRel); err == nil {
+					metadata.GetStore().Set(r.Context(), metadata.NamespaceUploaded, newRel, val)
+					metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, oldRel)
+				}
+			}
 		}
 	}
 
@@ -2356,9 +2887,32 @@ func batchDeleteFiles(writer http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// 记录是否为目录（删除前检查）
+		isDir := false
+		if info, err := os.Stat(absPath); err == nil {
+			isDir = info.IsDir()
+		}
+
+		// 删除关联的 ASS/XML 弹幕文件
+		if !isDir && isVideoFilePath(absPath) {
+			removeDanmakuSidecars(absPath)
+		}
+
 		if err := os.RemoveAll(absPath); err != nil {
 			results = append(results, Result{Path: path, Success: false, Message: translateOSError(err)})
 		} else {
+			// 清除上传标记
+			if isDir {
+				allMarks, _ := metadata.GetStore().GetAll(r.Context(), metadata.NamespaceUploaded)
+				prefix := path + "/" // key 统一用正斜杠
+				for key := range allMarks {
+					if strings.HasPrefix(key, prefix) {
+						metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, key)
+					}
+				}
+			} else {
+				metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, path)
+			}
 			results = append(results, Result{Path: path, Success: true, Message: "成功"})
 		}
 	}
@@ -2395,6 +2949,40 @@ func getLiveHostCookie(writer http.ResponseWriter, r *http.Request) {
 	writeJSON(writer, result)
 }
 
+func applyCookiesToLives(ctx context.Context, newCfg *configs.Config, hosts ...string) {
+	inst := instance.GetInstance(ctx)
+	hostSet := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		hostSet[host] = struct{}{}
+	}
+
+	for _, room := range newCfg.LiveRooms {
+		tmpurl, err := url.Parse(room.Url)
+		if err != nil {
+			continue
+		}
+		if _, ok := hostSet[tmpurl.Host]; !ok {
+			continue
+		}
+
+		liveObj, _ := inst.Lives.Get(room.LiveId)
+		if liveObj == nil {
+			inst.Lives.Range(func(_ types.LiveID, l live.Live) bool {
+				if l.GetRawUrl() == room.Url {
+					liveObj = l
+					return false
+				}
+				return true
+			})
+		}
+		if liveObj == nil {
+			applog.GetLogger().Warn("can't find live by id or url: " + string(room.LiveId) + " " + room.Url)
+			continue
+		}
+		liveObj.UpdateLiveOptionsbyConfig(ctx, &room)
+	}
+}
+
 func putLiveHostCookie(writer http.ResponseWriter, r *http.Request) {
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -2405,7 +2993,6 @@ func putLiveHostCookie(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	inst := instance.GetInstance(ctx)
 	data := gjson.ParseBytes(b)
 
 	host := data.Get("Host").Str
@@ -2431,35 +3018,190 @@ func putLiveHostCookie(writer http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	for _, v := range newCfg.LiveRooms {
-		tmpurl, _ := url.Parse(v.Url)
-		if tmpurl.Host != host {
-			continue
-		}
-		liveObj, _ := inst.Lives.Get(v.LiveId)
-		if liveObj == nil {
-			// fallback search by URL
-			inst.Lives.Range(func(_ types.LiveID, l live.Live) bool {
-				if l.GetRawUrl() == v.Url {
-					liveObj = l
-					return false
-				}
-				return true
-			})
-		}
-
-		if liveObj == nil {
-			applog.GetLogger().Warn("can't find live by id or url: " + string(v.LiveId) + " " + v.Url)
-			continue
-		}
-		liveObj.UpdateLiveOptionsbyConfig(ctx, &v)
-	}
+	applyCookiesToLives(ctx, newCfg, host)
 	if err := newCfg.Marshal(); err != nil {
 		applog.GetLogger().Error("failed to persistence config: " + err.Error())
 	}
 	writeJSON(writer, commonResp{
 		Data: "OK",
 	})
+}
+
+// getSoopLiveAuthConfig 返回 Soop 凭证状态和当前已保存的账号字段（仅用户名与是否存在已保存凭证标记），供 WebUI 面板初始化使用。
+// 注意：当前实现不会返回密码等敏感字段，只会返回 username 与 has_saved_credentials，避免将明文密码暴露给前端。
+func getSoopLiveAuthConfig(writer http.ResponseWriter, _ *http.Request) {
+	cfg := configs.GetCurrentConfig()
+	if cfg == nil {
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{
+			ErrNo:  http.StatusInternalServerError,
+			ErrMsg: "配置未加载",
+		})
+		return
+	}
+
+	var verifyResult *soop.CookieVerifyResult
+	verifyError := ""
+	cookieStatus := "missing"
+	storedCookie := ""
+	if cfg.Cookies != nil {
+		if cookie := strings.TrimSpace(cfg.Cookies["play.sooplive.com"]); cookie != "" {
+			storedCookie = cookie
+		}
+	}
+	if storedCookie != "" {
+		if result, err := soop.VerifyCookieStringCached(storedCookie); err == nil {
+			verifyResult = result
+			if result != nil && result.IsLogin {
+				cookieStatus = "valid"
+			} else {
+				cookieStatus = "invalid"
+				verifyError = "Soop Cookie 校验未通过，当前登录态已失效或权限不足"
+			}
+		} else {
+			cookieStatus = "error"
+			verifyError = err.Error()
+		}
+	}
+	applog.GetLogger().Debugf("Soop auth 状态查询: hasCookie=%v cookieStatus=%s hasSavedCredential=%v verifyError=%v",
+		storedCookie != "", cookieStatus, cfg.SoopLiveAuth.Username != "" || cfg.SoopLiveAuth.Password != "", verifyError != "")
+
+	writeJSON(writer, commonResp{
+		Data: map[string]any{
+			"username":              cfg.SoopLiveAuth.Username,
+			"has_saved_credentials": cfg.SoopLiveAuth.Username != "" || cfg.SoopLiveAuth.Password != "",
+			"cookie_status":         cookieStatus,
+			// verify 为空通常表示：
+			// 1. 当前没有保存 Cookie；
+			// 2. Soop 校验接口请求失败；
+			// 3. 平台暂时不可达。
+			"verify":       verifyResult,
+			"verify_error": verifyError,
+		},
+	})
+}
+
+// clearSoopLiveAuthConfig 清空 Soop 账号密码与持久化 Cookie。
+// 这会让后续 Soop 请求退回到“无登录态”模式。
+func clearSoopLiveAuthConfig(writer http.ResponseWriter, r *http.Request) {
+	applog.GetLogger().Debug("Soop 清空账号密码与 Cookie 请求开始")
+	newCfg, err := configs.UpdateWithRetry(func(c *configs.Config) error {
+		c.SoopLiveAuth.Username = ""
+		c.SoopLiveAuth.Password = ""
+		if c.Cookies != nil {
+			delete(c.Cookies, "play.sooplive.com")
+		}
+		return nil
+	}, 3, 10*time.Millisecond)
+	if err != nil {
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{
+			ErrNo:  http.StatusInternalServerError,
+			ErrMsg: "清空 Soop 凭证失败: " + err.Error(),
+		})
+		return
+	}
+
+	applyCookiesToLives(r.Context(), newCfg, "play.sooplive.com")
+	applog.GetLogger().Debug("Soop 清空账号密码与 Cookie 请求完成")
+	writeJSON(writer, commonResp{Data: "OK"})
+}
+
+// loginSoopLive 接收前端输入的账号密码，调用 Soop 登录接口换取 Cookie。
+// 登录成功后：
+// 1. 将 Cookie 写入配置文件；
+// 2. 按当前前端选择决定是否保存明文账号密码；
+// 3. 更新当前运行中 Soop 房间的请求选项。
+func loginSoopLive(writer http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username        string `json:"username"`
+		Password        string `json:"password"`
+		SaveCredentials bool   `json:"save_credentials"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: "请求体格式错误，无法解析 Soop 登录参数"})
+		return
+	}
+	if strings.TrimSpace(req.Username) == "" || strings.TrimSpace(req.Password) == "" {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: "Soop 账号或密码为空，请完整填写后再登录"})
+		return
+	}
+	applog.GetLogger().Debugf("Soop Web 登录开始: username=%s saveCredentials=%v", req.Username, req.SaveCredentials)
+
+	result, err := soop.LoginAndGetCookie(req.Username, req.Password)
+	if err != nil {
+		applog.GetLogger().WithError(err).Debugf("Soop Web 登录失败: username=%s", req.Username)
+		writeJsonWithStatusCode(writer, http.StatusUnauthorized, commonResp{
+			ErrNo:  http.StatusUnauthorized,
+			ErrMsg: "Soop 登录失败，后端未能完成“账号密码换 Cookie”流程；常见原因包括账号密码错误、平台风控、网络异常或接口已变更: " + err.Error(),
+		})
+		return
+	}
+
+	newCfg, err := configs.UpdateWithRetry(func(c *configs.Config) error {
+		if c.Cookies == nil {
+			c.Cookies = make(map[string]string)
+		}
+		c.Cookies["play.sooplive.com"] = result.Cookie
+		if req.SaveCredentials {
+			c.SoopLiveAuth.Username = req.Username
+			c.SoopLiveAuth.Password = req.Password
+		} else {
+			c.SoopLiveAuth.Username = ""
+			c.SoopLiveAuth.Password = ""
+		}
+		return nil
+	}, 3, 10*time.Millisecond)
+	if err != nil {
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{
+			ErrNo:  http.StatusInternalServerError,
+			ErrMsg: "Soop 登录成功，但写入配置失败: " + err.Error(),
+		})
+		return
+	}
+
+	applyCookiesToLives(r.Context(), newCfg, "play.sooplive.com")
+	applog.GetLogger().Debugf("Soop Web 登录成功: username=%s cookieLength=%d loginID=%s", req.Username, len(result.Cookie), result.Verify.LoginID)
+
+	writeJSON(writer, commonResp{
+		Data: map[string]any{
+			"cookie":   result.Cookie,
+			"verify":   result.Verify,
+			"username": result.Username,
+		},
+	})
+}
+
+// verifySoopLiveCookie 验证前端提供的 Soop Cookie 是否有效。
+// 常见失败原因：
+// - Cookie 已过期；
+// - Cookie 不完整；
+// - 账号已在平台侧退出登录；
+// - Soop 校验接口当前不可用。
+func verifySoopLiveCookie(writer http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Cookie string `json:"cookie"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: "请求体格式错误，无法解析 Soop Cookie"})
+		return
+	}
+	if strings.TrimSpace(req.Cookie) == "" {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: "Soop Cookie 不能为空"})
+		return
+	}
+	applog.GetLogger().Debugf("Soop Cookie 校验开始: cookieLength=%d", len(req.Cookie))
+
+	result, err := soop.VerifyCookieStringCached(req.Cookie)
+	if err != nil {
+		applog.GetLogger().WithError(err).Debug("Soop Cookie 校验失败")
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{
+			ErrNo:  http.StatusInternalServerError,
+			ErrMsg: "验证 Soop Cookie 失败；这通常表示校验接口当前不可用、网络异常，或平台返回了当前版本无法识别的响应: " + err.Error(),
+		})
+		return
+	}
+	applog.GetLogger().Debugf("Soop Cookie 校验完成: isLogin=%v loginID=%s", result.IsLogin, result.LoginID)
+
+	writeJSON(writer, commonResp{Data: result})
 }
 
 // getLiveSessionHistory 获取直播间的会话历史记录
@@ -2968,4 +3710,93 @@ func verifyBilibiliCookie(writer http.ResponseWriter, r *http.Request) {
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	writer.Write(body)
+}
+
+// startRecordDirect 直接启动录制（绕过 Listener，适用于 NotifyOnly 房间）
+func startRecordDirect(writer http.ResponseWriter, r *http.Request) {
+	inst := instance.GetInstance(r.Context())
+	vars := mux.Vars(r)
+	resp := commonResp{}
+
+	liveObj, ok := inst.Lives.Get(types.LiveID(vars["id"]))
+	if !ok {
+		resp.ErrNo = http.StatusNotFound
+		resp.ErrMsg = fmt.Sprintf("live id: %s can not find", vars["id"])
+		writeJsonWithStatusCode(writer, http.StatusNotFound, resp)
+		return
+	}
+
+	recorderMgr, ok := inst.RecorderManager.(recorders.Manager)
+	if !ok {
+		resp.ErrNo = http.StatusInternalServerError
+		resp.ErrMsg = "录制管理器不可用"
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, resp)
+		return
+	}
+
+	// 检查是否已在录制
+	if recorderMgr.HasRecorder(inst.Ctx, liveObj.GetLiveId()) {
+		resp.ErrNo = http.StatusConflict
+		resp.ErrMsg = "该直播间已在录制中"
+		writeJsonWithStatusCode(writer, http.StatusConflict, resp)
+		return
+	}
+
+	if err := recorderMgr.AddRecorder(inst.Ctx, liveObj); err != nil {
+		resp.ErrNo = http.StatusInternalServerError
+		resp.ErrMsg = fmt.Sprintf("启动录制失败: %s", err.Error())
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, resp)
+		return
+	}
+
+	// 广播录制开始事件
+	GetSSEHub().BroadcastListChange(liveObj.GetLiveId(), "record_start", map[string]interface{}{
+		"live_id": string(liveObj.GetLiveId()),
+	})
+
+	writeJSON(writer, parseInfo(r.Context(), liveObj))
+}
+
+// stopRecordDirect 直接停止录制
+func stopRecordDirect(writer http.ResponseWriter, r *http.Request) {
+	inst := instance.GetInstance(r.Context())
+	vars := mux.Vars(r)
+	resp := commonResp{}
+
+	liveObj, ok := inst.Lives.Get(types.LiveID(vars["id"]))
+	if !ok {
+		resp.ErrNo = http.StatusNotFound
+		resp.ErrMsg = fmt.Sprintf("live id: %s can not find", vars["id"])
+		writeJsonWithStatusCode(writer, http.StatusNotFound, resp)
+		return
+	}
+
+	recorderMgr, ok := inst.RecorderManager.(recorders.Manager)
+	if !ok {
+		resp.ErrNo = http.StatusInternalServerError
+		resp.ErrMsg = "录制管理器不可用"
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, resp)
+		return
+	}
+
+	if !recorderMgr.HasRecorder(inst.Ctx, liveObj.GetLiveId()) {
+		resp.ErrNo = http.StatusNotFound
+		resp.ErrMsg = "该直播间未在录制中"
+		writeJsonWithStatusCode(writer, http.StatusNotFound, resp)
+		return
+	}
+
+	if err := recorderMgr.RemoveRecorder(inst.Ctx, liveObj.GetLiveId()); err != nil {
+		resp.ErrNo = http.StatusInternalServerError
+		resp.ErrMsg = fmt.Sprintf("停止录制失败: %s", err.Error())
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, resp)
+		return
+	}
+
+	// 广播录制停止事件
+	GetSSEHub().BroadcastListChange(liveObj.GetLiveId(), "record_stop", map[string]interface{}{
+		"live_id": string(liveObj.GetLiveId()),
+	})
+
+	writeJSON(writer, parseInfo(r.Context(), liveObj))
 }

@@ -130,6 +130,7 @@ jobs:
             dist/**/*.zip
             dist/**/*.7z
           prerelease: ${{ contains(env.GIT_TAG, 'rc') }}
+          generate_release_notes: true
       - name: "[Dry-Run] 跳过 GitHub Release 发布"
         if: ${{ env.IS_DRY_RUN == 'true' }}
         run: echo "::notice::Dry-run 模式：跳过 GitHub Release 发布（GIT_TAG=$GIT_TAG）"
@@ -230,7 +231,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: ${{ env.IS_DRY_RUN != 'true' }}
           tags: ""
-          outputs: ${{ env.IS_DRY_RUN != 'true' && 'type=image,name=chigusa/bililive-go,push-by-digest=true,name-canonical=true' || '' }}
+          outputs: ${{ env.IS_DRY_RUN != 'true' && 'type=image,name=voeid/bililive-go,push-by-digest=true,name-canonical=true' || '' }}
           cache-from: type=gha,scope=docker-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=docker-${{ matrix.arch }}
 
@@ -266,9 +267,9 @@ jobs:
       - run: echo "GIT_TAG=`echo $(git describe --tags --abbrev=0)`" >> $GITHUB_ENV
       - run: |
           if ! echo $GIT_TAG | grep "rc" >/dev/null; then
-            DOCKER_TAGS="chigusa/bililive-go:$GIT_TAG,chigusa/bililive-go:latest"
+            DOCKER_TAGS="voeid/bililive-go:$GIT_TAG,voeid/bililive-go:latest"
           else
-            DOCKER_TAGS="chigusa/bililive-go:$GIT_TAG"
+            DOCKER_TAGS="voeid/bililive-go:$GIT_TAG"
           fi
           echo "DOCKER_TAGS=$DOCKER_TAGS" >> $GITHUB_ENV
 
@@ -297,7 +298,7 @@ jobs:
           DIGEST_ARGS=""
           for dgst in *; do
             if echo "$dgst" | grep -qE '^[0-9a-f]{64}$'; then
-              DIGEST_ARGS="$DIGEST_ARGS chigusa/bililive-go@sha256:$dgst"
+              DIGEST_ARGS="$DIGEST_ARGS voeid/bililive-go@sha256:$dgst"
             else
               echo "警告: 跳过非 digest 文件: $dgst"
             fi
@@ -311,5 +312,4 @@ jobs:
           done
 
       - name: Inspect final image
-        run: docker buildx imagetools inspect "chigusa/bililive-go:$GIT_TAG"
-
+        run: docker buildx imagetools inspect "voeid/bililive-go:$GIT_TAG"

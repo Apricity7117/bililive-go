@@ -18,6 +18,7 @@ type PlatformLimiter struct {
 	minInterval time.Duration // 最小访问间隔
 	lastAccess  time.Time     // 上次访问时间
 	mu          sync.Mutex    // 保护访问时间的互斥锁
+	inFlight    chan struct{} // 限制同一平台最多一个请求在途
 }
 
 var globalRateLimiter = &PlatformRateLimiter{
@@ -54,7 +55,27 @@ func (prl *PlatformRateLimiter) SetPlatformLimit(platform string, intervalSec in
 		prl.limiters[platform] = &PlatformLimiter{
 			minInterval: interval,
 			lastAccess:  time.Time{}, // 零值时间，首次访问不会被限制
+			inFlight:    make(chan struct{}, 1),
 		}
+	}
+}
+
+// EnsurePlatformLimit 在平台尚无限制时设置默认值，不覆盖已经显式配置的间隔。
+// 用于房间对象早于配置持久化创建的路径，保证首次请求也不会绕过平台保护。
+func (prl *PlatformRateLimiter) EnsurePlatformLimit(platform string, intervalSec int) {
+	if platform == "" || intervalSec <= 0 {
+		return
+	}
+
+	prl.mu.Lock()
+	defer prl.mu.Unlock()
+	if _, exists := prl.limiters[platform]; exists {
+		return
+	}
+	prl.limiters[platform] = &PlatformLimiter{
+		minInterval: time.Duration(intervalSec) * time.Second,
+		lastAccess:  time.Time{},
+		inFlight:    make(chan struct{}, 1),
 	}
 }
 
@@ -78,6 +99,41 @@ func (prl *PlatformRateLimiter) WaitForPlatformWithContext(ctx context.Context, 
 		return true
 	}
 
+	return waitForLimiterWithContext(ctx, limiter)
+}
+
+// AcquirePlatformWithContext 获取指定平台的请求许可，并保证同一平台最多只有一个请求在途。
+// 返回的 release 必须在请求完成后调用；平台未配置限制时返回空操作 release。
+//
+// 仅限制请求开始间隔不足以保护启动阶段：当前一个请求耗时超过最小间隔时，后续请求仍会
+// 重叠执行。这里把并发槽位与开始间隔合并为一次许可，使大量直播间并发初始化时仍按平台串行。
+func (prl *PlatformRateLimiter) AcquirePlatformWithContext(ctx context.Context, platform string) (release func(), ok bool) {
+	prl.mu.RLock()
+	limiter, exists := prl.limiters[platform]
+	prl.mu.RUnlock()
+	if !exists {
+		return func() {}, true
+	}
+
+	select {
+	case limiter.inFlight <- struct{}{}:
+	case <-ctx.Done():
+		return nil, false
+	}
+
+	releaseSlot := func() { <-limiter.inFlight }
+	if !waitForLimiterWithContext(ctx, limiter) {
+		releaseSlot()
+		return nil, false
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(releaseSlot)
+	}, true
+}
+
+func waitForLimiterWithContext(ctx context.Context, limiter *PlatformLimiter) bool {
 	for {
 		// 检查 context 是否已取消
 		select {

@@ -77,6 +77,18 @@ func (mr *MockDispatcherMockRecorder) DispatchEvent(event any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DispatchEvent", reflect.TypeOf((*MockDispatcher)(nil).DispatchEvent), event)
 }
 
+// DispatchEventSync mocks base method.
+func (m *MockDispatcher) DispatchEventSync(event *events.Event) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "DispatchEventSync", event)
+}
+
+// DispatchEventSync indicates an expected call of DispatchEventSync.
+func (mr *MockDispatcherMockRecorder) DispatchEventSync(event any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DispatchEventSync", reflect.TypeOf((*MockDispatcher)(nil).DispatchEventSync), event)
+}
+
 // RemoveAllEventListener mocks base method.
 func (m *MockDispatcher) RemoveAllEventListener(eventType events.EventType) {
 	m.ctrl.T.Helper()

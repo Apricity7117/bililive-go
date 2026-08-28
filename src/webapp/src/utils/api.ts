@@ -6,6 +6,7 @@
 
 import Utils from './common';
 import { StreamPreferenceV2 } from '../types/stream';
+import { message } from 'antd';
 
 const utils = new Utils();
 
@@ -41,6 +42,16 @@ class API {
     }
 
     /**
+     * 批量添加直播间
+     * @param urls URL列表
+     * @param listen 是否立即监听
+     * @param batchId 客户端生成的批次ID（可选，用于SSE进度追踪）
+     */
+    batchAddRooms(urls: string[], listen: boolean = true, notifyOnly: boolean = false, batchId?: string) {
+        return utils.requestPost(`${BASE_URL}/lives/batch`, { urls, listen, notify_only: notifyOnly, batch_id: batchId });
+    }
+
+    /**
      * 删除直播间
      * @param id 直播间id
      */
@@ -65,6 +76,22 @@ class API {
     }
 
     /**
+     * 直接启动录制（绕过 Listener，适用于 NotifyOnly 房间）
+     * @param liveId 直播间ID
+     */
+    startRecordDirect(liveId: string) {
+        return utils.requestPost(`${BASE_URL}/lives/${liveId}/startRecord`, {});
+    }
+
+    /**
+     * 直接停止录制
+     * @param liveId 直播间ID
+     */
+    stopRecordDirect(liveId: string) {
+        return utils.requestPost(`${BASE_URL}/lives/${liveId}/stopRecord`, {});
+    }
+
+    /**
      * 保存设置至config文件
      */
     saveSettings() {
@@ -78,13 +105,15 @@ class API {
         this.saveSettings()
             .then((rsp: any) => {
                 if (rsp.err_no === 0) {
-                    console.log('Save Settings success !!');
+                    if (rsp.err_msg) {
+                        message.warning(rsp.err_msg);
+                    }
                 } else {
-                    console.log('Server Error !!');
+                    message.error(rsp.err_msg || '保存设置失败');
                 }
             })
             .catch(err => {
-                alert(`保存设置失败:\n${err}`);
+                message.error(`保存设置失败: ${err?.message || err}`);
             })
     }
 
@@ -134,6 +163,30 @@ class API {
 
     batchDeleteFiles(paths: string[]) {
         return utils.requestPost(`${BASE_URL}/batch/file/delete`, { paths });
+    }
+
+    /**
+     * 批量烧录弹幕字幕到视频文件
+     * @param paths 视频文件路径列表
+     */
+    batchBurnFiles(paths: string[]) {
+        return utils.requestPost(`${BASE_URL}/pipeline/batch-burn`, { paths });
+    }
+
+    /**
+     * 上传单个文件到云盘
+     * @param path 文件路径
+     */
+    uploadFile(path: string) {
+        return utils.requestPost(`${BASE_URL}/file/upload`, { path });
+    }
+
+    /**
+     * 批量上传文件到云盘
+     * @param paths 文件路径列表
+     */
+    batchUploadFiles(paths: string[]) {
+        return utils.requestPost(`${BASE_URL}/batch/file/upload`, { paths });
     }
 
     /**
@@ -311,6 +364,38 @@ class API {
     }
 
     /**
+     * 获取 SoopLive 已保存的账号密码配置
+     */
+    getSoopLiveAuth() {
+        return utils.requestGet(`${BASE_URL}/sooplive/auth`);
+    }
+
+    /**
+     * 清空 SoopLive 已保存的账号密码与 Cookie
+     */
+    clearSoopLiveAuth() {
+        return utils.requestDelete(`${BASE_URL}/sooplive/auth`);
+    }
+
+    /**
+     * 使用账号密码登录 SoopLive 并换取 Cookie
+     */
+    loginSoopLive(username: string, password: string, saveCredentials: boolean = true) {
+        return utils.requestPost(`${BASE_URL}/sooplive/login`, {
+            username,
+            password,
+            save_credentials: saveCredentials,
+        });
+    }
+
+    /**
+     * 验证 SoopLive Cookie
+     */
+    verifySoopLiveCookie(cookie: string) {
+        return utils.requestPost(`${BASE_URL}/sooplive/cookie/verify`, { cookie });
+    }
+
+    /**
      * 切换直播间的流设置
      * 更新直播间的流配置并重启录制（如果正在录制中）
      * @param liveId 直播间ID
@@ -350,6 +435,20 @@ class API {
      */
     getUpdateStatus() {
         return utils.requestGet(`${BASE_URL}/update/status`);
+    }
+
+    /**
+     * 获取 FFmpeg 就绪状态
+     */
+    getFFmpegStatus() {
+        return utils.requestGet(`${BASE_URL}/ffmpeg/status`);
+    }
+
+    /**
+     * 重新触发 FFmpeg 检测/下载（用于下载失败或未找到后手动重试）
+     */
+    retryFFmpeg() {
+        return utils.requestPost(`${BASE_URL}/ffmpeg/retry`);
     }
 
     /**
@@ -405,4 +504,3 @@ class API {
 }
 
 export default API;
-

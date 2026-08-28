@@ -51,6 +51,7 @@ func (l *Live) getUid() (string, error) {
 		if err != nil {
 			return "", err
 		}
+		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			return "", live.ErrRoomNotExist
 		}
@@ -77,6 +78,7 @@ func (l *Live) getNickname(uid string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return "", live.ErrRoomNotExist
 	}

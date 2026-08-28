@@ -20,6 +20,8 @@ const (
 	ProcessCategoryKlive ProcessCategory = "klive"
 	// ProcessCategoryRecorder BililiveRecorder 修复进程
 	ProcessCategoryRecorder ProcessCategory = "bililive-recorder"
+	// ProcessCategoryScheduler 录制调度器进程
+	ProcessCategoryScheduler ProcessCategory = "bililive-scheduler"
 	// ProcessCategoryOther 其他进程
 	ProcessCategoryOther ProcessCategory = "other"
 )

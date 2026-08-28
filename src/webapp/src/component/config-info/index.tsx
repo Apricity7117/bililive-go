@@ -10,7 +10,7 @@ import {
   BellOutlined, LinkOutlined, InfoCircleOutlined, SaveOutlined,
   ReloadOutlined, EditOutlined, DeleteOutlined,
   RightOutlined, PlusOutlined, WarningOutlined,
-  ExclamationCircleOutlined, MobileOutlined
+  ExclamationCircleOutlined, MobileOutlined, WechatOutlined
 } from '@ant-design/icons';
 import { useLocation, Link } from 'react-router-dom';
 import Editor from 'react-simple-code-editor';
@@ -31,6 +31,7 @@ const { TextArea } = Input;
 // 功能开关：代理配置（开发中，设为 false 隐藏 UI）
 // 与后端 configs.EnableProxyConfig 对应
 const ENABLE_PROXY_CONFIG = false;
+const ENABLE_CLOUD_UPLOAD_SETTINGS = true;
 const { Panel } = Collapse;
 
 // 配置项类型定义
@@ -45,102 +46,6 @@ interface DownloaderAvailability {
 
 // 下载器类型常量
 type DownloaderType = 'ffmpeg' | 'native' | 'bililive-recorder' | '';
-type DanmakuFieldKey = 'enable' | 'save_gift' | 'use_server_timestamp' | 'use_cookie';
-
-interface DanmakuConfig {
-  enable: boolean;
-  save_gift: boolean;
-  use_server_timestamp: boolean;
-  use_cookie: boolean;
-  formats?: string[];
-}
-
-type DanmakuOverride = Partial<Record<DanmakuFieldKey, boolean>>;
-
-const DEFAULT_DANMAKU_CONFIG: DanmakuConfig = {
-  enable: false,
-  save_gift: false,
-  use_server_timestamp: true,
-  use_cookie: true,
-  formats: ['xml']
-};
-
-const DANMAKU_FIELDS: Array<{
-  key: DanmakuFieldKey;
-  label: string;
-  description: string;
-}> = [
-  {
-    key: 'enable',
-    label: '弹幕录制',
-    description: '开启后会为支持的平台保存弹幕文件'
-  },
-  {
-    key: 'save_gift',
-    label: '礼物信息',
-    description: '保存礼物、上舰等互动事件'
-  },
-  {
-    key: 'use_server_timestamp',
-    label: '使用服务器时间',
-    description: '优先使用弹幕服务器返回的时间戳'
-  },
-  {
-    key: 'use_cookie',
-    label: '使用 Cookie',
-    description: '弹幕连接时使用已配置的 Cookie'
-  }
-];
-
-const formatBoolStatus = (value: boolean) => value ? '已启用' : '已禁用';
-
-const normalizeDanmakuConfig = (value?: Partial<DanmakuConfig> | null): DanmakuConfig => ({
-  ...DEFAULT_DANMAKU_CONFIG,
-  ...(value || {})
-});
-
-const hasDanmakuOverride = (value: any, key: DanmakuFieldKey): boolean => {
-  return !!value && Object.prototype.hasOwnProperty.call(value, key) && value[key] !== undefined && value[key] !== null;
-};
-
-const getDanmakuOverrideKeys = (value: any): Set<DanmakuFieldKey> => {
-  return new Set(DANMAKU_FIELDS
-    .map(field => field.key)
-    .filter(key => hasDanmakuOverride(value, key)));
-};
-
-const resolveDanmakuConfig = (
-  override: any,
-  parent: DanmakuConfig
-): DanmakuConfig => {
-  const resolved = { ...parent };
-  DANMAKU_FIELDS.forEach(field => {
-    if (hasDanmakuOverride(override, field.key)) {
-      resolved[field.key] = !!override[field.key];
-    }
-  });
-  if (override?.formats) {
-    resolved.formats = override.formats;
-  }
-  return resolved;
-};
-
-const buildDanmakuPatch = (
-  values: any,
-  overrideKeys: Set<DanmakuFieldKey>,
-  clearedKeys: Set<DanmakuFieldKey>
-): Record<string, boolean | null> | undefined => {
-  const patch: Record<string, boolean | null> = {};
-  Array.from(overrideKeys).forEach(key => {
-    patch[key] = !!values?.[key];
-  });
-  Array.from(clearedKeys).forEach(key => {
-    if (!overrideKeys.has(key)) {
-      patch[key] = null;
-    }
-  });
-  return Object.keys(patch).length > 0 ? patch : undefined;
-};
 
 interface EffectiveConfig {
   rpc: { enable: boolean; bind: string };
@@ -169,15 +74,45 @@ interface EffectiveConfig {
     max_duration: number;
     max_file_size: string;
   };
-  danmaku: DanmakuConfig;
   on_record_finished: {
     convert_to_mp4: boolean;
     delete_flv_after_convert: boolean;
     custom_commandline: string;
     fix_flv_at_first: boolean;
+    cloud_upload: {
+      enable: boolean;
+      storage_name: string;
+      upload_path_tmpl: string;
+      delete_after_upload: boolean;
+      delete_all_after_upload: boolean;
+      upload_subtitles: boolean;
+    };
+    upload_timing: string;
+    burn_subtitles: boolean;
+    burn_subtitles_codec: string;
+    burn_subtitles_crf: string;
+    burn_subtitles_preset: string;
+    burn_delete_ass: boolean;
+    burn_delete_source: boolean;
+  };
+  openlist: {
+    port: number;
+    data_path: string;
+    username: string;
+    password: string;
+    token: string;
   };
   timeout_in_us: number;
   timeout_in_seconds: number;
+  danmaku_enable: boolean;
+  danmaku: {
+    font_size: number;
+    font_name: string;
+    scroll_time: number;
+    resolution: string;
+    outline: number;
+    opacity: number;
+  };
   notify: {
     send_recording_summary: boolean;
     telegram: {
@@ -242,7 +177,6 @@ interface PlatformStat {
   warning_message?: string;
   out_put_path?: string;
   ffmpeg_path?: string;
-  danmaku?: DanmakuOverride | null;
 }
 
 interface PlatformStatsResponse {
@@ -435,121 +369,6 @@ const ConfigField: React.FC<ConfigFieldProps> = ({
   );
 };
 
-const DanmakuGlobalFields: React.FC<{ config: EffectiveConfig }> = ({ config }) => {
-  const danmaku = normalizeDanmakuConfig(config.danmaku);
-
-  return (
-    <>
-      {DANMAKU_FIELDS.map(field => (
-        <ConfigField
-          key={field.key}
-          label={field.label}
-          description={field.description}
-          valueDisplay={formatBoolStatus(danmaku[field.key])}
-          id={`global-danmaku-${field.key}`}
-        >
-          <Form.Item name={['danmaku', field.key]} valuePropName="checked" noStyle>
-            <Switch />
-          </Form.Item>
-        </ConfigField>
-      ))}
-    </>
-  );
-};
-
-const DanmakuOverrideFields: React.FC<{
-  form: any;
-  overrideKeys: Set<DanmakuFieldKey>;
-  setOverrideKeys: React.Dispatch<React.SetStateAction<Set<DanmakuFieldKey>>>;
-  setClearedKeys: React.Dispatch<React.SetStateAction<Set<DanmakuFieldKey>>>;
-  inheritedValues: DanmakuConfig;
-  source: 'global' | 'platform' | ((key: DanmakuFieldKey) => 'global' | 'platform');
-  sourceLink: string | ((key: DanmakuFieldKey) => string);
-  idPrefix: string;
-}> = ({
-  form,
-  overrideKeys,
-  setOverrideKeys,
-  setClearedKeys,
-  inheritedValues,
-  source,
-  sourceLink,
-  idPrefix
-}) => {
-  const markOverridden = (key: DanmakuFieldKey) => {
-    setOverrideKeys(prev => {
-      const next = new Set(prev);
-      next.add(key);
-      return next;
-    });
-    setClearedKeys(prev => {
-      const next = new Set(prev);
-      next.delete(key);
-      return next;
-    });
-  };
-
-  const restoreInheritance = (key: DanmakuFieldKey) => {
-    setOverrideKeys(prev => {
-      const next = new Set(prev);
-      next.delete(key);
-      return next;
-    });
-    setClearedKeys(prev => {
-      const next = new Set(prev);
-      next.add(key);
-      return next;
-    });
-    form.setFieldsValue({
-      danmaku: {
-        [key]: inheritedValues[key]
-      }
-    });
-  };
-
-  return (
-    <>
-      {DANMAKU_FIELDS.map(field => {
-        const isOverridden = overrideKeys.has(field.key);
-        const inheritedValue = inheritedValues[field.key];
-        const inheritanceSource = typeof source === 'function' ? source(field.key) : source;
-        const inheritanceLink = typeof sourceLink === 'function' ? sourceLink(field.key) : sourceLink;
-
-        return (
-          <ConfigField
-            key={field.key}
-            label={field.label}
-            description={field.description}
-            inheritance={{
-              source: inheritanceSource,
-              linkTo: inheritanceLink,
-              isOverridden,
-              inheritedValue: formatBoolStatus(inheritedValue)
-            }}
-            id={`${idPrefix}-${field.key}`}
-          >
-            <Space>
-              <Form.Item name={['danmaku', field.key]} valuePropName="checked" noStyle>
-                <Switch onChange={() => markOverridden(field.key)} />
-              </Form.Item>
-              {isOverridden && (
-                <Button
-                  size="small"
-                  type="link"
-                  icon={<ReloadOutlined />}
-                  onClick={() => restoreInheritance(field.key)}
-                >
-                  恢复继承
-                </Button>
-              )}
-            </Space>
-          </ConfigField>
-        );
-      })}
-    </>
-  );
-};
-
 // 全局设置组件
 const GlobalSettings: React.FC<{
   config: EffectiveConfig;
@@ -568,7 +387,6 @@ const GlobalSettings: React.FC<{
           ...config.video_split_strategies,
           max_duration: config.video_split_strategies.max_duration / 1000000000
         } : undefined,
-        danmaku: normalizeDanmakuConfig(config.danmaku),
         stream_preference: config.stream_preference ? {
           ...config.stream_preference,
           attributes: config.stream_preference.attributes
@@ -767,11 +585,6 @@ const GlobalSettings: React.FC<{
           </ConfigField>
         </Card>
 
-        {/* 弹幕录制 */}
-        <Card title="弹幕录制" size="small" style={{ marginBottom: 16 }} id="global-danmaku">
-          <DanmakuGlobalFields config={config} />
-        </Card>
-
         {/* 流偏好配置 */}
         <Card title="流偏好配置" size="small" style={{ marginBottom: 16 }}>
           <ConfigField
@@ -874,7 +687,7 @@ const GlobalSettings: React.FC<{
               <Switch />
             </Form.Item>
           </ConfigField>
-          <ConfigField label="转换后删除 FLV" description="MP4 转换成功后删除原始 FLV 文件">
+          <ConfigField label="转换后删除 FLV" description="MP4 转换成功后标记原始 FLV 为待删除，全部处理阶段完成后才真正删除">
             <Form.Item name={['on_record_finished', 'delete_flv_after_convert']} valuePropName="checked" noStyle>
               <Switch />
             </Form.Item>
@@ -884,10 +697,15 @@ const GlobalSettings: React.FC<{
               <TextArea rows={3} placeholder="留空则不执行自定义命令" style={{ width: 500 }} />
             </Form.Item>
           </ConfigField>
+          <ConfigField label="烧录弹幕字幕" description="将 ASS 弹幕字幕硬编码到视频中（需要开启弹幕录制）">
+            <Form.Item name={['on_record_finished', 'burn_subtitles']} valuePropName="checked" noStyle>
+              <Switch />
+            </Form.Item>
+          </ConfigField>
         </Card>
 
-        {/* 云盘上传设置 */}
-        <CloudUploadSettings config={config} />
+        {/* 云盘上传设置（开发中） */}
+        {ENABLE_CLOUD_UPLOAD_SETTINGS && <CloudUploadSettings config={config} form={form} />}
 
         {/* 高级设置 */}
         <Card title="高级设置" size="small" style={{ marginBottom: 16 }}>
@@ -1187,6 +1005,25 @@ const NotifySettings: React.FC<{
           </ConfigField>
         </Card>
 
+        {/* WxPusher 通知 */}
+        <Card title={<><WechatOutlined /> WxPusher 推送 (微信)</>} size="small" style={{ marginBottom: 16 }}>
+          <ConfigField label="启用" description="开启后会在直播开始/结束时发送 WxPusher 推送通知">
+            <Form.Item name={['wxpusher', 'enable']} valuePropName="checked" noStyle>
+              <Switch />
+            </Form.Item>
+          </ConfigField>
+          <ConfigField label="AppToken" description="在 WxPusher 后台获取的应用令牌（格式 AT_xxxx）">
+            <Form.Item name={['wxpusher', 'appToken']} noStyle>
+              <Input placeholder="AT_xxxx" style={{ width: 400 }} />
+            </Form.Item>
+          </ConfigField>
+          <ConfigField label="接收者 UID" description="接收消息的用户 UID 列表（格式 UID_xxxx，输入后按回车添加）">
+            <Form.Item name={['wxpusher', 'uids']} noStyle>
+              <Select mode="tags" placeholder="输入 UID 后按回车添加" style={{ width: 400 }} />
+            </Form.Item>
+          </ConfigField>
+        </Card>
+
         <div className="config-actions">
           <Button
             type="primary"
@@ -1426,20 +1263,12 @@ const PlatformConfigForm: React.FC<{
   onNavigateToRoom: (liveId: string) => void;
 }> = ({ platform, globalConfig, globalInterval, onSave, onDelete, loading, onNavigateToRoom }) => {
   const [form] = Form.useForm();
-  const [danmakuOverrideKeys, setDanmakuOverrideKeys] = useState<Set<DanmakuFieldKey>>(new Set());
-  const [danmakuClearedKeys, setDanmakuClearedKeys] = useState<Set<DanmakuFieldKey>>(new Set());
 
   useEffect(() => {
     if (platform) {
-      const inheritedDanmaku = normalizeDanmakuConfig(globalConfig?.danmaku);
-      const platformDanmaku = (platform as any).danmaku;
-      setDanmakuOverrideKeys(getDanmakuOverrideKeys(platformDanmaku));
-      setDanmakuClearedKeys(new Set());
-
       // 转换 attributes: map -> array
       const displayPlatform = {
         ...platform,
-        danmaku: resolveDanmakuConfig(platformDanmaku, inheritedDanmaku),
         stream_preference: (platform as any).stream_preference ? {
           ...(platform as any).stream_preference,
           attributes: (platform as any).stream_preference.attributes
@@ -1447,10 +1276,9 @@ const PlatformConfigForm: React.FC<{
             : []
         } : { attributes: [] }
       };
-      form.resetFields();
       form.setFieldsValue(displayPlatform);
     }
-  }, [platform, globalConfig, form]);
+  }, [platform, form]);
 
 
   const handleSubmit = async () => {
@@ -1471,12 +1299,6 @@ const PlatformConfigForm: React.FC<{
           attributes: Object.keys(attributesMap).length > 0 ? attributesMap : undefined
         } : undefined
       };
-      const danmakuPatch = buildDanmakuPatch(values.danmaku, danmakuOverrideKeys, danmakuClearedKeys);
-      if (danmakuPatch) {
-        updatedValues.danmaku = danmakuPatch;
-      } else {
-        delete updatedValues.danmaku;
-      }
       onSave(updatedValues);
     } catch (error) {
       // Validation failed
@@ -1490,7 +1312,6 @@ const PlatformConfigForm: React.FC<{
     : 0;
 
   const platformKey = platform.platform_key;
-  const inheritedDanmaku = normalizeDanmakuConfig(globalConfig?.danmaku);
 
   return (
     <div id={`platforms-${platformKey}`}>
@@ -1639,20 +1460,6 @@ const PlatformConfigForm: React.FC<{
           </Form.Item>
         </ConfigField>
 
-        {/* 弹幕录制配置 - 平台级 */}
-        <Divider style={{ fontSize: 12 }}>弹幕录制 (覆盖全局)</Divider>
-
-        <DanmakuOverrideFields
-          form={form}
-          overrideKeys={danmakuOverrideKeys}
-          setOverrideKeys={setDanmakuOverrideKeys}
-          setClearedKeys={setDanmakuClearedKeys}
-          inheritedValues={inheritedDanmaku}
-          source="global"
-          sourceLink="/configInfo?tab=global#global-danmaku"
-          idPrefix={`platforms-${platformKey}-danmaku`}
-        />
-
         {/* 流偏好配置 - 平台级 */}
         <Divider style={{ fontSize: 12 }}>流偏好配置 (覆盖全局)</Divider>
 
@@ -1800,24 +1607,12 @@ export const RoomConfigForm: React.FC<{
   platformId?: string; // New prop for explicit platform ID
 }> = ({ room, globalConfig, onSave, loading, onRefresh, platformId }) => {
   const [form] = Form.useForm();
-  const [danmakuOverrideKeys, setDanmakuOverrideKeys] = useState<Set<DanmakuFieldKey>>(new Set());
-  const [danmakuClearedKeys, setDanmakuClearedKeys] = useState<Set<DanmakuFieldKey>>(new Set());
-
-  // Use platformId if provided, derived from backend using raw URL usually
-  // Fallback to room.address (CN Name) only if platformId is missing, but that usually fails for config lookup
-  const platformKey = platformId || room.address || '';
-  const platformConfig = (globalConfig?.platform_configs as any)?.[platformKey];
 
   useEffect(() => {
     if (room) {
-      const parentDanmaku = resolveDanmakuConfig((platformConfig as any)?.danmaku, normalizeDanmakuConfig(globalConfig?.danmaku));
-      setDanmakuOverrideKeys(getDanmakuOverrideKeys(room.danmaku));
-      setDanmakuClearedKeys(new Set());
-
       // 转换 attributes: map -> array
       const displayRoom = {
         ...room,
-        danmaku: resolveDanmakuConfig(room.danmaku, parentDanmaku),
         stream_preference: room.stream_preference ? {
           ...room.stream_preference,
           attributes: room.stream_preference.attributes
@@ -1825,10 +1620,9 @@ export const RoomConfigForm: React.FC<{
             : []
         } : { attributes: [] }
       };
-      form.resetFields();
       form.setFieldsValue(displayRoom);
     }
-  }, [room, globalConfig, platformConfig, form]);
+  }, [room, form]);
 
   const handleSubmit = async () => {
     try {
@@ -1848,12 +1642,6 @@ export const RoomConfigForm: React.FC<{
           attributes: Object.keys(attributesMap).length > 0 ? attributesMap : undefined
         } : undefined
       };
-      const danmakuPatch = buildDanmakuPatch(values.danmaku, danmakuOverrideKeys, danmakuClearedKeys);
-      if (danmakuPatch) {
-        updatedValues.danmaku = danmakuPatch;
-      } else {
-        delete updatedValues.danmaku;
-      }
       await onSave(updatedValues);
       message.success('直播间配置已更新');
       if (onRefresh) onRefresh();
@@ -1868,7 +1656,11 @@ export const RoomConfigForm: React.FC<{
     }
   };
 
-  const inheritedDanmaku = resolveDanmakuConfig((platformConfig as any)?.danmaku, normalizeDanmakuConfig(globalConfig?.danmaku));
+
+  // Use platformId if provided, derived from backend using raw URL usually
+  // Fallback to room.address (CN Name) only if platformId is missing, but that usually fails for config lookup
+  const platformKey = platformId || room.address || '';
+  const platformConfig = (globalConfig?.platform_configs as any)?.[platformKey];
 
   return (
     <Form form={form} layout="vertical">
@@ -1888,6 +1680,15 @@ export const RoomConfigForm: React.FC<{
 
       <ConfigField label="启用监控">
         <Form.Item name="is_listening" valuePropName="checked" noStyle>
+          <Switch />
+        </Form.Item>
+      </ConfigField>
+
+      <ConfigField
+        label="仅开播提醒"
+        description="开启后，直播开始时仅推送通知，不自动录制。开播后可手动点击【开始录制】按钮启动录制。注意：此模式下定时录制任务也会被跳过，如需定时录制请勿开启此选项"
+      >
+        <Form.Item name="notify_only" valuePropName="checked" noStyle>
           <Switch />
         </Form.Item>
       </ConfigField>
@@ -2042,22 +1843,6 @@ export const RoomConfigForm: React.FC<{
         </Form.Item>
       </ConfigField>
 
-
-      {/* 弹幕录制配置 - 房间级 */}
-      <Divider style={{ fontSize: 12, margin: '12px 0' }}>弹幕录制 (覆盖平台/全局)</Divider>
-
-      <DanmakuOverrideFields
-        form={form}
-        overrideKeys={danmakuOverrideKeys}
-        setOverrideKeys={setDanmakuOverrideKeys}
-        setClearedKeys={setDanmakuClearedKeys}
-        inheritedValues={inheritedDanmaku}
-        source={(key) => hasDanmakuOverride((platformConfig as any)?.danmaku, key) ? 'platform' : 'global'}
-        sourceLink={(key) => hasDanmakuOverride((platformConfig as any)?.danmaku, key)
-          ? `/configInfo?tab=platforms&platform=${platformKey}`
-          : '/configInfo?tab=global#global-danmaku'}
-        idPrefix={`rooms-live-${room.live_id}-danmaku`}
-      />
 
       {/* 流偏好配置 - 房间级 */}
       <Divider style={{ fontSize: 12, margin: '12px 0' }}>流偏好配置 (覆盖平台/全局)</Divider>

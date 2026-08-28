@@ -53,6 +53,7 @@ func (l *Live) GetHtmlBody() (htmlBody string, err error) {
 	if err != nil {
 		return
 	}
+	defer html.Body.Close()
 	if html.StatusCode != http.StatusOK {
 		err = fmt.Errorf("status code: %d", html.StatusCode)
 		return

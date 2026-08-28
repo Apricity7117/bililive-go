@@ -84,6 +84,7 @@ func initMux(ctx context.Context) *mux.Router {
 	apiRoute.HandleFunc("/raw-config", putRawConfig).Methods("PUT")
 	apiRoute.HandleFunc("/lives", getAllLives).Methods("GET")
 	apiRoute.HandleFunc("/lives", addLives).Methods("POST")
+	apiRoute.HandleFunc("/lives/batch", batchAddLives).Methods("POST")
 	apiRoute.HandleFunc("/lives/{id}", getLive).Methods("GET")
 	apiRoute.HandleFunc("/lives/{id}", removeLive).Methods("DELETE")
 	apiRoute.HandleFunc("/lives/{id}/logs", getLiveLogs).Methods("GET")
@@ -91,6 +92,8 @@ func initMux(ctx context.Context) *mux.Router {
 	apiRoute.HandleFunc("/lives/{id}/name-history", getLiveNameHistory).Methods("GET")   // 获取名称变更历史
 	apiRoute.HandleFunc("/lives/{id}/history", getLiveHistory).Methods("GET")            // 获取统一历史事件（支持分页筛选）
 	apiRoute.HandleFunc("/lives/{id}/switchStream", switchStreamHandler).Methods("POST") // 切换流设置（需要请求体，必须在通配符之前）
+	apiRoute.HandleFunc("/lives/{id}/startRecord", startRecordDirect).Methods("POST")   // 直接启动录制（适用于 NotifyOnly 房间）
+	apiRoute.HandleFunc("/lives/{id}/stopRecord", stopRecordDirect).Methods("POST")     // 直接停止录制
 	apiRoute.HandleFunc("/lives/{id}/{action}", parseLiveAction).Methods("GET")          // 通配符路由必须放在最后
 	apiRoute.HandleFunc("/file/{path:.*}", getFileInfo).Methods("GET")
 	apiRoute.HandleFunc("/file/{path:.*}", renameFile).Methods("PUT")
@@ -104,6 +107,10 @@ func initMux(ctx context.Context) *mux.Router {
 	apiRoute.HandleFunc("/bilibili/qrcode", getBilibiliQRCode).Methods("GET")
 	apiRoute.HandleFunc("/bilibili/qrcode/poll", pollBilibiliQRCode).Methods("GET")
 	apiRoute.HandleFunc("/bilibili/cookie/verify", verifyBilibiliCookie).Methods("POST")
+	apiRoute.HandleFunc("/sooplive/auth", getSoopLiveAuthConfig).Methods("GET")
+	apiRoute.HandleFunc("/sooplive/auth", clearSoopLiveAuthConfig).Methods("DELETE")
+	apiRoute.HandleFunc("/sooplive/login", loginSoopLive).Methods("POST")
+	apiRoute.HandleFunc("/sooplive/cookie/verify", verifySoopLiveCookie).Methods("POST")
 	apiRoute.HandleFunc("/sse", sseHandler).Methods("GET") // SSE 实时推送端点
 	// 远程 WebUI 路由
 	apiRoute.HandleFunc("/webui/remote/status", getRemoteWebuiStatus).Methods("GET")  // 获取远程 WebUI 状态
@@ -134,14 +141,23 @@ func initMux(ctx context.Context) *mux.Router {
 	// 内存监控 API 路由
 	apiRoute.HandleFunc("/memory/snapshots", getMemorySnapshots).Methods("GET") // 获取内存快照
 
+	// FFmpeg 状态 API 路由
+	apiRoute.HandleFunc("/ffmpeg/status", getFFmpegStatusHandler).Methods("GET")
+	// 重试 FFmpeg 检测/下载（下载失败或未找到后由用户手动触发）
+	apiRoute.HandleFunc("/ffmpeg/retry", retryFFmpegHandler).Methods("POST")
+
+	// 测试专用调试路由（dev 构建标签时注册，生产构建为空操作）
+	registerDevDebugRoutes(apiRoute)
+
 	// OpenList (云上传) API 路由
 	apiRoute.HandleFunc("/openlist/status", getOpenListStatus).Methods("GET")
 	apiRoute.HandleFunc("/openlist/check-storage", checkOpenListStorageHealth).Methods("GET")
 
-	// Pipeline 任务路由
+	// Pipeline 任务路由 + 手动上传路由
 	inst := instance.GetInstance(ctx)
 	if pm := pipeline.GetManager(inst); pm != nil {
 		RegisterPipelineHandlers(apiRoute, pm)
+		RegisterUploadHandlers(apiRoute, pm)
 	}
 
 	// OSRP 开放直播录制协议路由
@@ -194,7 +210,15 @@ func initMux(ctx context.Context) *mux.Router {
 				return
 			case <-ticker.C:
 				port := tools.GetWebUIPort()
-				if port == 0 || port == lastPort {
+				if port == lastPort {
+					continue
+				}
+				if port == 0 {
+					// 端口归零：进程退出，恢复 503 占位 handler
+					dyn.h.Store(handlerHolder{H: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						http.Error(w, "Tools Web UI 未就绪", http.StatusServiceUnavailable)
+					})})
+					lastPort = 0
 					continue
 				}
 				lastPort = port
@@ -206,6 +230,58 @@ func initMux(ctx context.Context) *mux.Router {
 				}
 				// 热切换为新的 proxy（保持与初始 Store 相同的具体类型）
 				dyn.h.Store(handlerHolder{H: http.Handler(proxy)})
+			}
+		}
+	})
+
+	// /scheduler/ 动态反向代理：录制调度器 Web UI
+	sched := &dynamicHandler{}
+	sched.h.Store(handlerHolder{H: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Scheduler Web UI 未就绪", http.StatusServiceUnavailable)
+	})})
+	m.PathPrefix("/scheduler/").Handler(
+		http.StripPrefix(
+			"/scheduler",
+			sched,
+		),
+	)
+	m.HandleFunc("/scheduler", func(w http.ResponseWriter, r *http.Request) {
+		target := "/scheduler/"
+		if q := r.URL.RawQuery; q != "" {
+			target += "?" + q
+		}
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
+	})
+
+	// 监控 scheduler 端口变化并热更新反向代理
+	bilisentry.GoWithContext(ctx, func(ctx context.Context) {
+		var lastPort int
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				port := tools.GetSchedulerPort()
+				if port == lastPort {
+					continue
+				}
+				if port == 0 {
+					// 端口归零：进程退出，恢复 503 占位 handler
+					sched.h.Store(handlerHolder{H: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						http.Error(w, "Scheduler Web UI 未就绪", http.StatusServiceUnavailable)
+					})})
+					lastPort = 0
+					continue
+				}
+				lastPort = port
+				target, _ := url.Parse("http://localhost:" + strconv.Itoa(port))
+				proxy := httputil.NewSingleHostReverseProxy(target)
+				proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+					http.Error(w, "无法连接到 Scheduler Web UI: "+err.Error(), http.StatusBadGateway)
+				}
+				sched.h.Store(handlerHolder{H: http.Handler(proxy)})
 			}
 		}
 	})
@@ -289,6 +365,21 @@ func setupRecorderStatusBroadcast() {
 	// 设置回调函数，让 recorders 包能够调用 SSE 广播
 	recorders.SetBroadcastRecorderStatusFunc(func(liveId types.LiveID, status map[string]interface{}) {
 		GetSSEHub().BroadcastRecorderStatus(liveId, status)
+	})
+
+	// 设置弹幕广播回调，让 recorders 包能够将弹幕消息推送到 SSE
+	recorders.SetBroadcastDanmakuFunc(func(liveId types.LiveID, msgType, username, content string, extra map[string]interface{}) {
+		GetSSEHub().BroadcastDanmaku(liveId, map[string]interface{}{
+			"type":       msgType,
+			"username":   username,
+			"content":    content,
+			"color":      extra["color"],
+			"timestamp":  extra["timestamp"],
+			"gift_name":  extra["gift_name"],
+			"num":        extra["num"],
+			"price":      extra["price"],
+			"coin_type":  extra["coin_type"],
+		})
 	})
 
 	// 设置录制结束回调，用于触发优雅更新检查

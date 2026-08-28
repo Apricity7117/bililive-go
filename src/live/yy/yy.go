@@ -118,6 +118,7 @@ func (l *Live) getRoomInfo() ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	defer resp.Body.Close()
 
 	/**
 	未开播主播 roomInitUrl 接口 返回 {"resultCode":0,"data":null}
@@ -137,6 +138,7 @@ func (l *Live) getRoomInfo() ([]byte, bool, error) {
 		if err != nil {
 			return nil, false, err
 		}
+		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			return nil, false, live.ErrRoomNotExist
 		}
@@ -194,6 +196,7 @@ func (l *Live) GetStreamUrls() (us []*url.URL, err error) {
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, live.ErrInternalError
 	}

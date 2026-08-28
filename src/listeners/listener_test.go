@@ -3,6 +3,7 @@ package listeners
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bluele/gcache"
@@ -133,4 +134,36 @@ func TestListenerStartAndClose(t *testing.T) {
 	assert.NoError(t, l.Start())
 	l.Close()
 	l.Close()
+}
+
+func TestClosedListenerDoesNotPublishInfo(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ed := evtmock.NewMockDispatcher(ctrl)
+	ctx := context.WithValue(context.Background(), instance.Key, &instance.Instance{EventDispatcher: ed})
+	live := livemock.NewMockLive(ctrl)
+	l := NewListener(ctx, live).(*listener)
+	atomic.StoreUint32(&l.state, running)
+	ed.EXPECT().DispatchEvent(events.NewEvent(ListenStop, live))
+	l.Close()
+
+	// 模拟网络请求在 listener 关闭后才返回开播信息；不得再发布 LiveStart。
+	l.processInfo(&livepkg.Info{Status: true})
+	assert.False(t, l.status.roomStatus)
+}
+
+func TestListenerCloseSyncWaitsForStopHandlers(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ed := evtmock.NewMockDispatcher(ctrl)
+	ctx := context.WithValue(context.Background(), instance.Key, &instance.Instance{EventDispatcher: ed})
+	live := livemock.NewMockLive(ctrl)
+	l := NewListener(ctx, live).(*listener)
+	atomic.StoreUint32(&l.state, running)
+	ed.EXPECT().DispatchEventSync(events.NewEvent(ListenStop, live))
+
+	l.CloseSync()
+	assert.True(t, l.isStopped())
 }

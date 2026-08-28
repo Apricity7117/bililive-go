@@ -6,11 +6,12 @@ import (
 
 // 内置阶段名称常量
 const (
-	StageNameFixFlv       = "fix_flv"
-	StageNameConvertMp4   = "convert_mp4"
-	StageNameExtractCover = "extract_cover"
-	StageNameCloudUpload  = "cloud_upload"
-	StageNameCustomCmd    = "custom_command"
+	StageNameFixFlv         = "fix_flv"
+	StageNameConvertMp4     = "convert_mp4"
+	StageNameExtractCover   = "extract_cover"
+	StageNameCloudUpload    = "cloud_upload"
+	StageNameCustomCmd      = "custom_command"
+	StageNameBurnSubtitles  = "burn_subtitles"
 )
 
 // 阶段选项键常量
@@ -21,12 +22,28 @@ const (
 	OptionStorage = "storage"
 	// OptionPathTemplate 上传路径模板
 	OptionPathTemplate = "path_template"
-	// OptionDeleteAfter 上传后是否删除
+	// OptionDeleteAfter 上传后是否删除已上传的文件
 	OptionDeleteAfter = "delete_after"
+	// OptionDeleteAllAfter 上传后是否删除全部文件（含中间产物）
+	OptionDeleteAllAfter = "delete_all_after"
+	// OptionUploadTiming 上传时机（immediate/after_process）
+	OptionUploadTiming = "upload_timing"
 	// OptionCommand 自定义命令
 	OptionCommand = "command"
 	// OptionFileTypes 处理的文件类型过滤
 	OptionFileTypes = "file_types"
+	// OptionUploadSubtitles 是否上传关联的 .ass 弹幕字幕文件
+	OptionUploadSubtitles = "upload_subtitles"
+	// OptionCodec 视频编码器
+	OptionCodec = "codec"
+	// OptionCrf CRF 质量值
+	OptionCrf = "crf"
+	// OptionPreset 编码预设
+	OptionPreset = "preset"
+	// OptionBurnDeleteAss 烧录后是否删除 ASS 文件
+	OptionBurnDeleteAss = "burn_delete_ass"
+	// OptionBurnDeleteSource 烧录后是否删除源视频文件
+	OptionBurnDeleteSource = "burn_delete_source"
 )
 
 // OnRecordFinishedPipeline 扩展版的录制完成后配置
@@ -40,6 +57,12 @@ type OnRecordFinishedPipeline struct {
 	SaveCover             bool                 `yaml:"save_cover,omitempty" json:"save_cover,omitempty"`
 	CloudUpload           configs.CloudUpload  `yaml:"cloud_upload,omitempty" json:"cloud_upload,omitempty"`
 	UploadTiming          configs.UploadTiming `yaml:"upload_timing,omitempty" json:"upload_timing,omitempty"`
+	BurnSubtitles         bool                 `yaml:"burn_subtitles,omitempty" json:"burn_subtitles,omitempty"`
+	BurnSubtitlesCodec    string               `yaml:"burn_subtitles_codec,omitempty" json:"burn_subtitles_codec,omitempty"`
+	BurnSubtitlesCrf      string               `yaml:"burn_subtitles_crf,omitempty" json:"burn_subtitles_crf,omitempty"`
+	BurnSubtitlesPreset   string               `yaml:"burn_subtitles_preset,omitempty" json:"burn_subtitles_preset,omitempty"`
+	BurnDeleteAss         bool                 `yaml:"burn_delete_ass,omitempty" json:"burn_delete_ass,omitempty"`
+	BurnDeleteSource      bool                 `yaml:"burn_delete_source,omitempty" json:"burn_delete_source,omitempty"`
 
 	// 新格式字段
 	Pipeline *PipelineConfig `yaml:"pipeline,omitempty" json:"pipeline,omitempty"`
@@ -54,14 +77,34 @@ func ConvertLegacyConfig(legacy *configs.OnRecordFinished) *PipelineConfig {
 
 	var stages []StageConfig
 
-	// 1. FLV 修复（在转换之前）
+	// 构建云上传阶段配置
+	cloudUploadStage := StageConfig{
+		Name: StageNameCloudUpload,
+		Options: map[string]any{
+			OptionStorage:        legacy.CloudUpload.StorageName,
+			OptionPathTemplate:   legacy.CloudUpload.UploadPathTmpl,
+			OptionDeleteAfter:    legacy.CloudUpload.DeleteAfterUpload,
+			OptionDeleteAllAfter: legacy.CloudUpload.DeleteAllAfterUpload,
+			OptionUploadTiming:   string(legacy.UploadTiming),
+			OptionFileTypes:      []string{string(FileTypeVideo), string(FileTypeCover)},
+			OptionUploadSubtitles: legacy.CloudUpload.UploadSubtitles,
+		},
+	}
+	hasCloudUpload := legacy.CloudUpload.Enable && legacy.CloudUpload.StorageName != ""
+
+	// 立即上传模式：上传在所有处理之前
+	if hasCloudUpload && legacy.UploadTiming == configs.UploadTimingImmediate {
+		stages = append(stages, cloudUploadStage)
+	}
+
+	// FLV 修复（在转换之前）
 	if legacy.FixFlvAtFirst {
 		stages = append(stages, StageConfig{
 			Name: StageNameFixFlv,
 		})
 	}
 
-	// 2. MP4 转换
+	// MP4 转换
 	if legacy.ConvertToMp4 {
 		stages = append(stages, StageConfig{
 			Name: StageNameConvertMp4,
@@ -71,26 +114,33 @@ func ConvertLegacyConfig(legacy *configs.OnRecordFinished) *PipelineConfig {
 		})
 	}
 
-	// 3. 封面提取
+	// 弹幕字幕烧录（在 MP4 转换之后，封面提取之前）
+	if legacy.BurnSubtitles {
+		stages = append(stages, StageConfig{
+			Name: StageNameBurnSubtitles,
+			Options: map[string]any{
+				OptionCodec:           legacy.BurnSubtitlesCodec,
+				OptionCrf:             legacy.BurnSubtitlesCrf,
+				OptionPreset:          legacy.BurnSubtitlesPreset,
+				OptionBurnDeleteAss:   legacy.BurnDeleteAss,
+				OptionBurnDeleteSource: legacy.BurnDeleteSource,
+			},
+		})
+	}
+
+	// 封面提取
 	if legacy.SaveCover {
 		stages = append(stages, StageConfig{
 			Name: StageNameExtractCover,
 		})
 	}
 
-	// 4. 云上传
-	if legacy.CloudUpload.Enable && legacy.CloudUpload.StorageName != "" {
-		stages = append(stages, StageConfig{
-			Name: StageNameCloudUpload,
-			Options: map[string]any{
-				OptionStorage:      legacy.CloudUpload.StorageName,
-				OptionPathTemplate: legacy.CloudUpload.UploadPathTmpl,
-				OptionDeleteAfter:  legacy.CloudUpload.DeleteAfterUpload,
-			},
-		})
+	// 后处理完成后上传模式：上传在所有处理之后（默认行为）
+	if hasCloudUpload && legacy.UploadTiming != configs.UploadTimingImmediate {
+		stages = append(stages, cloudUploadStage)
 	}
 
-	// 5. 自定义命令（在最后执行）
+	// 自定义命令（在最后执行）
 	if legacy.CustomCommandline != "" {
 		stages = append(stages, StageConfig{
 			Name: StageNameCustomCmd,

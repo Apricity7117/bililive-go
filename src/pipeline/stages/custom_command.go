@@ -12,6 +12,7 @@ import (
 
 	"github.com/bililive-go/bililive-go/src/pipeline"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
+	"github.com/bililive-go/bililive-go/src/tools"
 )
 
 // CustomCommandStage 自定义命令阶段
@@ -50,6 +51,14 @@ func (s *CustomCommandStage) Execute(ctx *pipeline.PipelineContext, input []pipe
 	var output []pipeline.FileInfo
 
 	for _, file := range input {
+		// 跳过中间产物（如 ConvertMp4 标记的原始 FLV），避免重复执行命令。
+		// 但 delete_all_after_upload 模式会将所有文件（含最终成品）标记为 Deletable，
+		// 此类文件仍需执行自定义命令，不能跳过。
+		if file.Deletable && !isDeleteAllMarked(file) {
+			output = append(output, file)
+			continue
+		}
+
 		// 渲染命令模板
 		cmdStr, err := s.renderCommand(ctx, file)
 		if err != nil {
@@ -76,6 +85,16 @@ func (s *CustomCommandStage) Execute(ctx *pipeline.PipelineContext, input []pipe
 	return output, nil
 }
 
+// isDeleteAllMarked 检查文件是否被 delete_all_after_upload 模式标记
+// 此类文件虽为 Deletable，但属于最终成品，仍需执行自定义命令
+func isDeleteAllMarked(file pipeline.FileInfo) bool {
+	if file.Metadata == nil {
+		return false
+	}
+	da, ok := file.Metadata["delete_all"].(bool)
+	return ok && da
+}
+
 // renderCommand 渲染命令模板
 func (s *CustomCommandStage) renderCommand(ctx *pipeline.PipelineContext, file pipeline.FileInfo) (string, error) {
 	// 构建模板数据
@@ -99,8 +118,13 @@ func (s *CustomCommandStage) renderCommand(ctx *pipeline.PipelineContext, file p
 		FFmpeg:    ctx.FFmpegPath,
 	}
 
-	// 如果 FFmpeg 路径为空，尝试获取
-	if data.FFmpeg == "" {
+	// 仅当模板确实引用了 .FFmpeg 且当前路径为空时才等待后台下载完成：否则无关模板
+	// （如只做上传/通知）会被无关的 FFmpeg 下载阻塞，下载卡住时该后处理也无法运行。
+	// 等待被中断（ctx 取消）时返回错误，保持对取消信号的一致响应。
+	if data.FFmpeg == "" && strings.Contains(s.commandTmpl, ".FFmpeg") {
+		if waitErr := tools.WaitFFmpegAsyncInitDone(ctx.Ctx, nil); waitErr != nil {
+			return "", waitErr
+		}
 		if ffmpegPath, err := utils.GetFFmpegPath(ctx.Ctx); err == nil {
 			data.FFmpeg = ffmpegPath
 		}
