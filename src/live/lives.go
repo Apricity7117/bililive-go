@@ -323,6 +323,14 @@ func (w *WrappedLive) Close() {
 	}
 }
 
+// SetNickName 把别名写入转发给底层 Live 实现。
+// WrappedLive 自身不持有 Options，别名快照存放在被包装的 Live（BaseLive）上。
+func (w *WrappedLive) SetNickName(nickName string) {
+	if setter, ok := w.Live.(nickNameSetter); ok {
+		setter.SetNickName(nickName)
+	}
+}
+
 // GetRoomID 返回底层 Live 已解析的数字房间号（如有）。
 // 用于斗鱼等平台别名 URL 的弹幕录制。
 func (w *WrappedLive) GetRoomID() string {
@@ -418,10 +426,64 @@ func (w *WrappedLive) GetInfo() (*Info, error) {
 		w.cache.Set(w, i)
 	}
 
+	// 拿到真实主播名后维护别名，防止主播改名导致录制目录漂移。
+	if !requestFailed && i != nil {
+		ReconcileNickName(w, i.HostName)
+	}
+
 	// 发送调度器刷新完成事件，通知前端更新倒计时
 	w.dispatchSchedulerRefreshEvent()
 
 	return i, nil
+}
+
+// nickNameSetter 由内存选项支持换指针写入的 Live 实现（BaseLive）满足。
+type nickNameSetter interface {
+	SetNickName(string)
+}
+
+// ReconcileNickName 以配置为准维护直播间别名。
+//
+// 先将空别名回填为当前主播名并落盘（用户手动设置过的别名不会被覆盖），
+// 再把配置中的别名同步回内存选项，因为录制输出模板读的是
+// .Live.GetOptions.NickName，只写配置会让别名到下次重启才生效。
+// 同步走 SetNickName 的换指针写法，避免与模板渲染 goroutine 争用同一个 Options。
+// 任何失败只记日志，不影响调用方的主流程。
+//
+// Args:
+//
+//	l: 目标直播间，需要能提供原始 URL 与内存选项。
+//	hostName: 平台返回的当前主播名称，为空时只做配置到内存的同步。
+func ReconcileNickName(l Live, hostName string) {
+	if l == nil {
+		return
+	}
+	rawUrl := l.GetRawUrl()
+	if rawUrl == "" {
+		return
+	}
+	if err := configs.BackfillLiveRoomNickName(rawUrl, hostName); err != nil {
+		l.GetLogger().Warnf("固化直播间别名失败：%v", err)
+	}
+	cfg := configs.GetCurrentConfig()
+	if cfg == nil {
+		return
+	}
+	// 只读查找：本函数在 GetInfo 热路径上，不能触发索引缓存写入。
+	room, err := cfg.PeekLiveRoomByUrl(rawUrl)
+	if err != nil || room == nil {
+		return
+	}
+	opts := l.GetOptions()
+	if opts == nil || opts.NickName == room.NickName {
+		return
+	}
+	setter, ok := l.(nickNameSetter)
+	if !ok {
+		// 底层实现不支持安全写入时跳过同步：别名已落盘，最迟下次重启生效。
+		return
+	}
+	setter.SetNickName(room.NickName)
 }
 
 // recordRequestResult 更新调度器的请求时间和连续失败计数。

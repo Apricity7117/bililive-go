@@ -749,6 +749,11 @@ func addLiveImpl(ctx context.Context, urlStr string, isListen bool, notifyOnly b
 				return nil, err
 			}
 		}
+		// live.New 内部的首次 GetInfo 早于 AppendLiveRoom，那时房间还不在配置里，
+		// 别名回填会被跳过；这里补一次，同时覆盖 listen=false 永不轮询的房间。
+		if hostName := confirmedHostName(newLive); hostName != "" {
+			live.ReconcileNickName(newLive, hostName)
+		}
 	}
 	if isListen {
 		inst.ListenerManager.(listeners.Manager).AddListener(ctx, newLive)
@@ -761,6 +766,30 @@ func addLiveImpl(ctx context.Context, urlStr string, isListen bool, notifyOnly b
 		"listening": isListen,
 	})
 	return info, nil
+}
+
+// confirmedHostName 读取缓存中平台真实返回的主播名称。
+//
+// 只取初始化已完成的缓存结果，因此不会拿到 InitializingLive 的占位信息，
+// 也不会像 parseInfo 那样返回「初始化中...」「获取失败」等展示用占位文案。
+//
+// Args:
+//
+//	l: 刚创建的直播间对象。
+//
+// Returns:
+//
+//	真实主播名称；尚未成功获取时返回空串。
+func confirmedHostName(l live.Live) string {
+	wrapped, ok := l.(*live.WrappedLive)
+	if !ok {
+		return ""
+	}
+	info, found := wrapped.GetCachedInfo()
+	if !found || info.Initializing {
+		return ""
+	}
+	return info.HostName
 }
 
 func batchAddLives(writer http.ResponseWriter, r *http.Request) {

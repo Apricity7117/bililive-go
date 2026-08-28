@@ -2,7 +2,9 @@ package configs
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/bililive-go/bililive-go/src/pkg/ratelimit"
 	"github.com/bililive-go/bililive-go/src/types"
@@ -398,6 +400,93 @@ sooplive_auth:
 	assert.NoError(t, err)
 	assert.Equal(t, "tester", cfg.SoopLiveAuth.Username)
 	assert.Equal(t, "secret", cfg.SoopLiveAuth.Password)
+}
+
+func TestBackfillLiveRoomNickName(t *testing.T) {
+	const roomURL = "http://live.bilibili.com/123"
+
+	// 每个子用例都基于临时配置文件，以便验证回填是否真正落盘。
+	setup := func(t *testing.T, nickName string) string {
+		t.Helper()
+		configFile := filepath.Join(t.TempDir(), "config.yml")
+		content := "rpc:\n  enable: true\nlive_rooms:\n  - url: " + roomURL + "\n"
+		if nickName != "" {
+			content += "    nick_name: " + nickName + "\n"
+		}
+		assert.NoError(t, os.WriteFile(configFile, []byte(content), 0644))
+
+		cfg, err := NewConfigWithFile(configFile)
+		assert.NoError(t, err)
+		SetCurrentConfig(cfg)
+		t.Cleanup(func() { SetCurrentConfig(NewConfig()) })
+		return configFile
+	}
+
+	t.Run("空别名回填并持久化", func(t *testing.T) {
+		configFile := setup(t, "")
+
+		assert.NoError(t, BackfillLiveRoomNickName(roomURL, "原主播名"))
+
+		room, err := GetCurrentConfig().GetLiveRoomByUrl(roomURL)
+		assert.NoError(t, err)
+		assert.Equal(t, "原主播名", room.NickName)
+
+		content, err := os.ReadFile(configFile)
+		assert.NoError(t, err)
+		assert.Contains(t, string(content), "nick_name: 原主播名")
+	})
+
+	t.Run("非空别名不被覆盖", func(t *testing.T) {
+		setup(t, "用户自定义")
+
+		assert.NoError(t, BackfillLiveRoomNickName(roomURL, "平台新名"))
+
+		room, err := GetCurrentConfig().GetLiveRoomByUrl(roomURL)
+		assert.NoError(t, err)
+		assert.Equal(t, "用户自定义", room.NickName)
+	})
+
+	t.Run("主播名为空不写入", func(t *testing.T) {
+		setup(t, "")
+
+		assert.NoError(t, BackfillLiveRoomNickName(roomURL, ""))
+
+		room, err := GetCurrentConfig().GetLiveRoomByUrl(roomURL)
+		assert.NoError(t, err)
+		assert.Equal(t, "", room.NickName)
+	})
+
+	t.Run("房间不存在不报错", func(t *testing.T) {
+		setup(t, "")
+
+		assert.NoError(t, BackfillLiveRoomNickName("http://live.bilibili.com/999", "任意名称"))
+	})
+
+	// R3：手动清空别名等于「希望重新固化」，下一次取到主播名时应再次回填。
+	t.Run("清空别名后可再次回填", func(t *testing.T) {
+		setup(t, "")
+
+		assert.NoError(t, BackfillLiveRoomNickName(roomURL, "首次固化"))
+		room, err := GetCurrentConfig().GetLiveRoomByUrl(roomURL)
+		assert.NoError(t, err)
+		assert.Equal(t, "首次固化", room.NickName)
+
+		// 模拟用户在前端手动清空别名
+		_, err = UpdateWithRetry(func(c *Config) error {
+			r, e := c.GetLiveRoomByUrl(roomURL)
+			if e != nil {
+				return e
+			}
+			r.NickName = ""
+			return nil
+		}, 3, 10*time.Millisecond)
+		assert.NoError(t, err)
+
+		assert.NoError(t, BackfillLiveRoomNickName(roomURL, "清空后新名"))
+		room, err = GetCurrentConfig().GetLiveRoomByUrl(roomURL)
+		assert.NoError(t, err)
+		assert.Equal(t, "清空后新名", room.NickName)
+	})
 }
 
 // Helper functions for pointer conversion

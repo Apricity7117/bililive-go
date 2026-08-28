@@ -1005,6 +1005,46 @@ func SetLiveRoomListening(url string, listening bool) (*Config, error) {
 	}, 3, 10*time.Millisecond)
 }
 
+// BackfillLiveRoomNickName 在房间别名为空时，将其回填为当前主播名称并持久化。
+//
+// 用于防止主播改名导致录制目录漂移：别名一旦固化便不再自动变化，
+// 用户手动修改过的别名永远不会被覆盖；手动清空别名则视为希望重新固化。
+// 本函数位于 GetInfo 热路径上，因此先做一次无锁快速检查，
+// 只有确实需要回填时才进入带锁的 UpdateWithRetry 并落盘。
+//
+// Args:
+//
+//	url: 直播间原始 URL，用于定位配置中的房间。
+//	hostName: 平台返回的当前主播名称，为空时不回填。
+//
+// Returns:
+//
+//	回填失败时返回错误；无需回填、房间不存在或配置未初始化时返回 nil。
+func BackfillLiveRoomNickName(url, hostName string) error {
+	if url == "" || hostName == "" {
+		return nil
+	}
+	// 快速路径：常态下别名已固化，仅需一次内存读取即可返回。
+	cfg := GetCurrentConfig()
+	if cfg == nil {
+		return nil
+	}
+	// 用只读查找，避免热路径上写 liveRoomIndexCache。
+	room, err := cfg.PeekLiveRoomByUrl(url)
+	if err != nil || room == nil || room.NickName != "" {
+		return nil
+	}
+
+	_, err = UpdateWithRetry(func(c *Config) error {
+		// 二次校验：加锁后配置可能已被其他协程或用户改写。
+		if r, e := c.GetLiveRoomByUrl(url); e == nil && r.NickName == "" {
+			r.NickName = hostName
+		}
+		return nil
+	}, 3, 10*time.Millisecond)
+	return err
+}
+
 // SetLiveRoomId 设置指定 URL 的房间的 LiveId
 // LiveId 不持久化，因此使用 Transient 更新
 func SetLiveRoomId(url string, id types.LiveID) (*Config, error) {
@@ -1282,6 +1322,28 @@ func (c *Config) GetLiveRoomByUrl(url string) (*LiveRoom, error) {
 		}
 	}
 	return room, nil
+}
+
+// PeekLiveRoomByUrl 按 URL 只读查找直播间，不会触碰内部索引缓存。
+//
+// GetLiveRoomByUrl 未命中时会调用 RefreshLiveRoomIndexCache 写 liveRoomIndexCache，
+// 在 GetInfo / MarshalJSON 这类高频且并发的读路径上会造成并发 map 读写。
+// 本函数改为线性扫描 LiveRooms（房间数量为几十级，开销可忽略），完全不读写该 map。
+//
+// Args:
+//
+//	url: 直播间原始 URL。
+//
+// Returns:
+//
+//	命中的房间指针；未找到时返回错误。
+func (c *Config) PeekLiveRoomByUrl(url string) (*LiveRoom, error) {
+	for i := range c.LiveRooms {
+		if c.LiveRooms[i].Url == url {
+			return &c.LiveRooms[i], nil
+		}
+	}
+	return nil, errors.New("room " + url + " doesn't exist.")
 }
 
 func (c Config) getLiveRoomByUrlImpl(url string) (*LiveRoom, error) {

@@ -91,6 +91,21 @@ func (a *BaseLive) UpdateLiveOptionsbyConfig(ctx context.Context, room *configs.
 	return
 }
 
+// SetNickName 更新内存中的直播间别名快照。
+//
+// 录制输出模板会在其他 goroutine 读取 Options.NickName，就地改写 string 字段
+// 存在双字撕裂读的数据竞争，因此这里复制一份 Options 再整体替换指针
+// （与 UpdateLiveOptionsbyConfig 的换指针写法一致）。
+// 不复用 UpdateLiveOptionsbyConfig：部分平台重写了该方法并会顺带重置运行态。
+func (a *BaseLive) SetNickName(nickName string) {
+	if a.Options == nil {
+		return
+	}
+	cp := *a.Options
+	cp.NickName = nickName
+	a.Options = &cp
+}
+
 func (a *BaseLive) SetLiveIdByString(value string) {
 	a.LiveId = genLiveIdByString(value)
 }

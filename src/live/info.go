@@ -3,6 +3,7 @@ package live
 import (
 	"encoding/json"
 
+	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/types"
 )
 
@@ -108,7 +109,7 @@ func (i *Info) MarshalJSON() ([]byte, error) {
 		Initializing:              i.Initializing,
 		AudioOnly:                 i.AudioOnly,
 		NotifyOnly:                i.NotifyOnly,
-		NickName:                  i.Live.GetOptions().NickName,
+		NickName:                  i.resolveNickName(),
 		LastError:                 i.LastError,
 		AvailableStreams:          i.AvailableStreams,
 		AvailableStreamsUpdatedAt: i.AvailableStreamsUpdatedAt,
@@ -118,4 +119,17 @@ func (i *Info) MarshalJSON() ([]byte, error) {
 		t.LastStartTimeUnix = i.Live.GetLastStartTime().Unix()
 	}
 	return json.Marshal(t)
+}
+
+// resolveNickName 读取直播间别名，以配置为唯一数据源。
+// 内存选项里的别名是创建时的快照，配置被改写后可能滞后，
+// 因此优先读配置；房间不在配置中（如临时房间）时退回选项快照。
+// MarshalJSON 是高频并发路径，必须用只读查找，不能触发索引缓存写入。
+func (i *Info) resolveNickName() string {
+	if cfg := configs.GetCurrentConfig(); cfg != nil {
+		if room, err := cfg.PeekLiveRoomByUrl(i.Live.GetRawUrl()); err == nil && room != nil {
+			return room.NickName
+		}
+	}
+	return i.Live.GetOptions().NickName
 }

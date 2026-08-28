@@ -322,6 +322,7 @@ interface IState {
 interface ItemData {
     key: string,
     name: string,
+    nickName: string,
     room: Room,
     address: string,
     tags: string[],
@@ -493,7 +494,8 @@ class LiveList extends React.Component<Props, IState> {
                 </PopDialog>
                 <Divider type="vertical" />
                 <Button type="link" size="small" onClick={(e) => {
-                    this.props.navigate(`/fileList/${data.address}/${data.name}`);
+                    // 录制目录为 {平台}/{别名，为空则主播名}，此处需与输出模板保持一致
+                    this.props.navigate(`/fileList/${data.address}/${data.nickName || data.name}`);
                 }}>文件</Button>
                 <Divider type="vertical" />
                 <a
@@ -518,6 +520,36 @@ class LiveList extends React.Component<Props, IState> {
                 return a.name.localeCompare(b.name);
             },
             render: (name: string) => <span>{name}</span>
+        },
+        {
+            title: '别名',
+            dataIndex: 'nickName',
+            key: 'nickName',
+            // 限宽 + 省略，避免超长别名把其他列挤压变形；全文由 Tooltip 展示
+            width: 160,
+            ellipsis: true,
+            sorter: (a: ItemData, b: ItemData) => {
+                return a.nickName.localeCompare(b.nickName);
+            },
+            render: (nickName: string, data: ItemData) => (
+                <span
+                    onClick={(e) => e.stopPropagation()}
+                    style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}
+                >
+                    <Text
+                        editable={{
+                            text: nickName,
+                            tooltip: '点击修改别名（决定录制目录名）',
+                            onChange: (value: string) => this.saveNickName(data, value)
+                        }}
+                        type={nickName ? undefined : 'secondary'}
+                        ellipsis={{ tooltip: nickName || undefined }}
+                        style={{ minWidth: 0 }}
+                    >
+                        {nickName || '-'}
+                    </Text>
+                </span>
+            )
         },
         {
             title: '直播间名称',
@@ -913,6 +945,28 @@ class LiveList extends React.Component<Props, IState> {
     }
 
     /**
+     * 保存直播间别名
+     *
+     * 别名决定录制目录名（{平台}/{别名}），为空时回退为主播名。
+     * @param data 当前行数据
+     * @param value 用户输入的新别名
+     */
+    saveNickName = (data: ItemData, value: string) => {
+        const nickName = value.trim();
+        if (nickName === data.nickName) {
+            return;
+        }
+        api.updateRoomConfigById(data.roomId, { nick_name: nickName })
+            .then(() => {
+                message.success('别名保存成功');
+                this.refresh();
+            })
+            .catch(err => {
+                message.error(`别名保存失败: ${err}`);
+            });
+    }
+
+    /**
      * 刷新页面数据
      */
     refresh = () => {
@@ -958,7 +1012,8 @@ class LiveList extends React.Component<Props, IState> {
 
                     return {
                         key: index + 1,
-                        name: item.nick_name || item.host_name,
+                        name: item.host_name || '',
+                        nickName: item.nick_name || '',
                         room: {
                             roomName: item.room_name,
                             url: item.live_url,
